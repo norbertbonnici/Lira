@@ -1,0 +1,37 @@
+{{define "title"}}{{.Heading}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">{{.Heading}}</h1>
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Account.Name}}" required autofocus>
+    </label>
+    {{$t := .Account.Type}}
+    <label>Type
+      <select name="type">
+        <option value="savings" {{if eq $t "savings"}}selected{{end}}>Savings</option>
+        <option value="checking" {{if eq $t "checking"}}selected{{end}}>Checking</option>
+        <option value="cash" {{if eq $t "cash"}}selected{{end}}>Cash</option>
+      </select>
+    </label>
+    <div class="row2">
+      <label>Currency
+        <input name="currency" value="{{with .Account.Currency}}{{.}}{{else}}EUR{{end}}" maxlength="3">
+      </label>
+      <label>Opening balance
+        <input name="opening_balance" type="text" inputmode="decimal" value="{{printf "%.2f" .Account.OpeningBalance}}">
+      </label>
+    </div>
+    <label class="check">
+      <input type="checkbox" name="spending" value="1" {{if .Account.Spending}}checked{{end}}>
+      Spending account — funds operating costs; <strong>excluded from net worth and projects</strong>
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/accounts">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Balance is the opening balance plus every transaction on this account. Mark an account as a <strong>spending account</strong> for day-to-day bills (groceries, fuel, subscriptions): its balance won't count toward net worth or project funding, and your budgets track actuals from it.</p>
+</div>
+{{end}}

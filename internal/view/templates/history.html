@@ -1,0 +1,55 @@
+{{define "title"}}Net worth · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Net worth history</h1>
+  <span>
+    <a class="addlink" href="/forecast">Forecast →</a> &nbsp;
+    <form method="post" action="/snapshot" class="moveform" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit" class="linklike">Record snapshot</button>
+    </form>
+  </span>
+</div>
+
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">Now</span><span class="v">{{eur .NAV}}</span></div>
+    <div><span class="k">Cash</span><span class="v">{{eur .Cash}}</span></div>
+    <div><span class="k">Investments</span><span class="v">{{eur .Investments}}</span></div>
+    {{if .Last}}<div><span class="k">Change ({{.Count}} snapshots)</span><span class="v {{signClass .Change}}">{{eur .Change}}{{if .ChangePct}} · {{printf "%+.1f" .ChangePct}}%{{end}}</span></div>{{end}}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>History</h2></div>
+  {{if .HasHistory}}
+  <div class="chartwrap">{{chart .Chart}}</div>
+  <div class="legend">
+    <span><i class="sw sw-inv"></i> Investments</span>
+    <span><i class="sw sw-cash"></i> Cash</span>
+    <span class="muted small">Top edge = total net worth</span>
+  </div>
+  {{else}}
+  <p class="empty">Not enough history yet — a snapshot is recorded automatically each day, or hit “Record snapshot”. The chart appears once there are two points.</p>
+  {{end}}
+</section>
+
+{{if .Snapshots}}
+<section class="panel">
+  <div class="panel-head"><h2>Snapshots</h2></div>
+  <table class="table">
+    <thead><tr><th>Date</th><th class="num">Cash</th><th class="num">Investments</th><th class="num">Net worth</th></tr></thead>
+    <tbody>
+    {{range .Snapshots}}
+      <tr>
+        <td class="muted">{{slice .TakenAt 0 10}}</td>
+        <td class="num">{{eur .CashEUR}}</td>
+        <td class="num">{{eur .InvEUR}}</td>
+        <td class="num">{{eur .NavEUR}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+{{end}}

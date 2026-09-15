@@ -1,0 +1,35 @@
+{{define "title"}}Two-factor setup · Lira{{end}}
+{{define "content"}}
+<div class="authcard wide">
+{{if .Done}}
+  <h1 class="display">Save your recovery codes</h1>
+  <p class="muted">Two-factor authentication is on. Store these somewhere safe — each code works once if you ever lose your authenticator.</p>
+  <ul class="codes">
+    {{range .RecoveryCodes}}<li>{{.}}</li>{{end}}
+  </ul>
+  <a class="primary button" href="/">I've saved them — continue</a>
+{{else}}
+  <h1 class="display">Set up two-factor</h1>
+  <p class="muted">Add this account to an authenticator app (Google Authenticator, Aegis, 1Password…), then enter the 6-digit code to confirm.</p>
+  <div class="secretbox">
+    <span class="k">Setup key</span>
+    <code class="secret">{{.Secret}}</code>
+  </div>
+  <details class="uri">
+    <summary>Or paste the full otpauth:// URI</summary>
+    <code>{{.OtpURL}}</code>
+  </details>
+  <form method="post" action="/2fa/setup">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>6-digit code
+      <input name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" required autofocus>
+    </label>
+    <button type="submit" class="primary">Confirm &amp; enable</button>
+  </form>
+{{end}}
+  <form method="post" action="/logout" class="signout-mini">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" class="linklike">Sign out</button>
+  </form>
+</div>
+{{end}}

@@ -1,0 +1,54 @@
+{{define "title"}}Insights · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Insights</h1>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><h2>{{.CurMonth}}</h2><span class="muted small">this month so far</span></div>
+  <div class="kpis">
+    <div><span class="k">Income</span><span class="v">{{eur .CurIncome}}</span></div>
+    <div><span class="k">Spending</span><span class="v neg">{{eur .CurExpense}}</span></div>
+    <div><span class="k">Net saved</span><span class="v {{signClass .CurNet}}">{{eur .CurNet}}</span></div>
+    <div><span class="k">Savings rate</span><span class="v {{signClass .CurNet}}">{{printf "%.0f" .CurRate}}%</span></div>
+  </div>
+  <p class="muted small">Transfers between your own accounts are excluded. Amounts are summed in EUR.</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Spending by category</h2><span class="muted small">{{.CurMonth}}</span></div>
+  {{if .Categories}}
+  <table class="table">
+    <tbody>
+    {{range .Categories}}
+      <tr>
+        <td>{{.Category}}</td>
+        <td style="width:55%"><div class="bar-track"><div class="bar-fill" style="width: {{.Pct}}%"></div></div></td>
+        <td class="num">{{eur .Amount}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">No spending recorded this month yet.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Last 12 months</h2></div>
+  <table class="table">
+    <thead><tr><th>Month</th><th class="num">Income</th><th class="num">Spending</th><th class="num">Net</th><th class="num">Rate</th></tr></thead>
+    <tbody>
+    {{range .Months}}
+      <tr>
+        <td>{{.Month}}</td>
+        <td class="num">{{eur .Income}}</td>
+        <td class="num">{{eur .Expense}}</td>
+        <td class="num {{signClass .Net}}">{{eur .Net}}</td>
+        <td class="num muted">{{if .Income}}{{printf "%.0f" .Rate}}%{{else}}—{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

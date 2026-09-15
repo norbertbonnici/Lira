@@ -1,0 +1,32 @@
+{{define "title"}}Transactions · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Transactions</h1>
+  <span><a class="addlink" href="/categories">Categories</a> &nbsp; <a class="addlink" href="/transactions/import">Import</a> &nbsp; <a class="addlink" href="/transactions/export">Export</a> &nbsp; <a class="addlink" href="/transfer">Transfer</a> &nbsp; <a class="primary button" href="/transactions/new">+ New transaction</a></span>
+</div>
+{{if .Transactions}}
+<table class="table tx">
+  <thead><tr><th>Date</th><th>Payee</th><th>Account</th><th>Category</th><th class="num">Amount</th><th></th></tr></thead>
+  <tbody>
+  {{range .Transactions}}
+    <tr>
+      <td class="date">{{.Date}}</td>
+      <td>{{if .Payee}}{{.Payee}}{{else}}<span class="muted">—</span>{{end}}{{if .TransferID.Valid}} <span class="tag">transfer</span>{{end}}</td>
+      <td>{{.AccountName}}</td>
+      <td class="muted">{{.CategoryName}}</td>
+      <td class="num {{signClass .Amount}}">{{eur .Amount}}</td>
+      <td class="rowact">
+        {{if not .TransferID.Valid}}<a href="/transactions/{{.ID}}/edit">Edit</a>{{end}}
+        <form method="post" action="/transactions/{{.ID}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <button type="submit" class="linklike danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">No transactions yet. <a href="/transactions/new">Record one.</a></p>
+{{end}}
+{{end}}

@@ -1,0 +1,17 @@
+{{define "title"}}Import complete · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Import complete</h1>
+  <p><strong>{{.Imported}}</strong> transaction{{if ne .Imported 1}}s{{end}} imported.{{if .Skipped}} <span class="muted">{{.Skipped}} row{{if ne .Skipped 1}}s{{end}} skipped.</span>{{end}}</p>
+  {{if .Reasons}}
+  <p class="muted small">Skipped:</p>
+  <ul class="muted small">
+    {{range .Reasons}}<li>{{.Count}} × {{.Reason}}</li>{{end}}
+  </ul>
+  {{end}}
+  <div class="actions">
+    <a class="primary button" href="/transactions">View transactions</a>
+    <a class="cancel" href="/transactions/import">Import another</a>
+  </div>
+</div>
+{{end}}

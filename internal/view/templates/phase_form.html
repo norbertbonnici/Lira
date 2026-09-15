@@ -1,0 +1,19 @@
+{{define "title"}}Edit phase · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Edit phase</h1>
+  <form method="post" action="/projects/{{.ProjectID}}/phases/{{.Phase.ID}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Phase.Name}}" required autofocus>
+    </label>
+    <label>Target date
+      <input type="date" name="target_date" value="{{.Phase.TargetDate}}">
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/projects/{{.ProjectID}}">Cancel</a>
+    </div>
+  </form>
+</div>
+{{end}}

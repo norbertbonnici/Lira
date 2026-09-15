@@ -1,0 +1,28 @@
+[Unit]
+Description=Lira personal finance
+After=network.target
+
+[Service]
+Type=simple
+User=lira
+Group=lira
+WorkingDirectory=/opt/lira
+ExecStart=/opt/lira/lira
+EnvironmentFile=/opt/lira/lira.env
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/lira
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

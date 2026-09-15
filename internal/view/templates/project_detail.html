@@ -1,0 +1,229 @@
+{{define "title"}}{{.Project.Name}} · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">{{.Project.Name}} <span class="tag">{{.Project.Status}}</span></h1>
+  <span><a class="addlink" href="/projects/{{.Project.ID}}/plan">Saving plan →</a> &nbsp; <a class="addlink" href="/projects/{{.Project.ID}}/edit">Edit</a></span>
+</div>
+
+<section class="hero">
+  <span class="eyebrow">Budget{{if .LoanFinanced}} · loan-financed{{else}}{{if .Project.TargetDate}} · target {{.Project.TargetDate}}{{end}}{{end}}</span>
+  <div class="nav-figure">{{eur .Plan.Target}}</div>
+  <div class="bar-track"><div class="bar-fill" style="width: {{pct .Plan.Spent .Plan.Target}}%"></div></div>
+  <div class="hero-split">
+    <div><span class="k">Spent</span><span class="v">{{eur .Plan.Spent}}</span></div>
+    <div><span class="k">Remaining</span><span class="v">{{eur .Plan.Remaining}}</span></div>
+    {{if .LoanFinanced}}
+    <div><span class="k">Deposit{{if .Project.DepositPaid}}{{if .DepositRemaining}} · part-paid{{else}} · paid {{.Project.DepositPaidDate}}{{end}}{{end}}</span><span class="v">{{if .Project.DepositPaid}}{{eur .Project.DepositPaid}}{{else}}{{eur .Plan.Financed}}{{end}}</span></div>
+    {{if .Plan.LoanStart}}
+    <div><span class="k">Loan / month · from {{.Plan.LoanStart}}</span><span class="v">{{eur .Loan.Monthly}}</span></div>
+    {{else if .Plan.MonthsLeft}}
+    <div><span class="k">Loan / month · {{.Plan.MonthsLeft}} mo</span><span class="v">{{eur .Plan.MonthlyToSave}}</span></div>
+    {{else}}
+    <div><span class="k">Loan</span><span class="v">repaid ✓</span></div>
+    {{end}}
+    {{else}}
+    <div><span class="k">From savings ({{printf "%g" .Project.FinancePct}}%)</span><span class="v">{{eur .Plan.Financed}}</span></div>
+    <div><span class="k">{{if .HasPhases}}Save / month (all phases){{else}}{{if .Plan.Overdue}}Still to fund{{else}}Save / month{{if .Plan.MonthsLeft}} · {{.Plan.MonthsLeft}} mo left{{end}}{{end}}{{end}}</span><span class="v">{{if and (not .HasPhases) .Plan.Overdue}}{{eur .Plan.ToSave}}{{else}}{{eur .Plan.MonthlyToSave}}{{end}}</span></div>
+    {{end}}
+  </div>
+  <p class="muted small">
+    {{if .LoanFinanced}}
+    {{if and .Project.DepositPaid (not .DepositRemaining)}}
+    The deposit was paid (last payment {{.Project.DepositPaidDate}}) — your balances already reflect it; the rest is repaid monthly{{if .Plan.LoanStart}} from {{.Plan.LoanStart}}{{end}}. See the loan breakdown below.
+    {{else if .Project.DepositPaid}}
+    {{eur .Project.DepositPaid}} of the deposit is paid; the remaining {{eur .DepositRemaining}} would leave {{eur .AfterNAV}} net worth ({{eur .AfterCash}} in liquid cash). The rest is repaid monthly{{if .Plan.LoanStart}} from {{.Plan.LoanStart}}{{end}}.
+    {{else}}
+    The {{eur .Plan.Financed}} deposit is drawn from savings, leaving {{eur .AfterNAV}} net worth ({{eur .AfterCash}} in liquid cash); the rest is repaid monthly{{if .Plan.LoanStart}} from {{.Plan.LoanStart}}{{end}}. See the loan breakdown below.
+    {{end}}
+    {{else}}
+    Financing {{eur .Plan.Financed}} from savings would leave {{eur .AfterNAV}} net worth ({{eur .AfterCash}} in liquid cash).
+    {{if .ShortCash}}<span class="neg">That's more than your liquid cash — you'd need to sell investments or save more first.</span>{{end}}
+    {{end}}
+  </p>
+</section>
+
+{{range .Groups}}
+<section class="panel">
+  <div class="panel-head">
+    <h2>{{if $.HasPhases}}{{.Name}}{{else}}Items{{end}}{{if .Done}} <span class="tag">funded</span>{{end}}</h2>
+    {{if and $.HasPhases (not .IsGeneral)}}
+    <span class="muted small">{{if .TargetDate}}by {{.TargetDate}}{{else}}no date{{end}} · <a href="/projects/{{$.Project.ID}}/phases/{{.Phase.ID}}/edit">edit</a></span>
+    {{end}}
+  </div>
+
+  {{if and $.HasPhases .Plan.Target}}
+  <div class="kpis" style="margin-bottom:8px">
+    <div><span class="k">Budget</span><span class="v">{{eur .Plan.Target}}</span></div>
+    <div><span class="k">Spent</span><span class="v">{{eur .Plan.Spent}}</span></div>
+    <div><span class="k">{{if .Done}}Funded{{else}}{{if .Plan.Overdue}}Still to fund{{else}}Save / month{{if .Plan.MonthsLeft}} · {{.Plan.MonthsLeft}} mo{{end}}{{end}}{{end}}</span><span class="v">{{if .Done}}✓{{else if .Plan.Overdue}}{{eur .Plan.ToSave}}{{else}}{{eur .Plan.MonthlyToSave}}{{end}}</span></div>
+  </div>
+  <div class="bar-track"><div class="bar-fill" style="width: {{pct .Plan.Spent .Plan.Target}}%"></div></div>
+  {{end}}
+
+  {{if .Items}}
+  <table class="table">
+    <thead><tr><th>Item</th><th>Type</th><th class="num">Estimate</th><th class="num">Paid</th><th></th></tr></thead>
+    <tbody>
+    {{range .Items}}
+      {{$item := .}}
+      <tr>
+        <td>{{.Name}}{{if .Purchased}} <span class="tag">paid</span>{{else if .AmountPaid}} <span class="tag">part-paid</span>{{end}}</td>
+        <td class="muted">{{if .Essential}}must-have{{else}}nice-to-have{{end}}</td>
+        <td class="num">{{eur .EstimatedCost}}</td>
+        <td class="num">{{if .AmountPaid}}{{eur .AmountPaid}}{{if not .Purchased}}<br><span class="muted small">{{eur .Remaining}} left</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+        <td class="rowact">
+          {{if $.HasPhases}}
+          <form method="post" action="/projects/{{$.Project.ID}}/items/{{.ID}}/move" class="moveform">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <select name="phase_id" aria-label="Move to phase">
+              <option value="" {{if not $item.PhaseID.Valid}}selected{{end}}>General</option>
+              {{range $.Phases}}<option value="{{.ID}}" {{if and $item.PhaseID.Valid (eq $item.PhaseID.Int64 .ID)}}selected{{end}}>{{.Name}}</option>{{end}}
+            </select>
+            <button type="submit" class="linklike">Move</button>
+          </form>
+          {{end}}
+          {{if not .Purchased}}
+          <a href="/projects/{{$.Project.ID}}/items/{{.ID}}/purchase">{{if .AmountPaid}}Pay balance{{else}}Pay{{end}}</a>
+          <a href="/projects/{{$.Project.ID}}/items/{{.ID}}/edit">Edit</a>
+          {{end}}
+          <form method="post" action="/projects/{{$.Project.ID}}/items/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">No items in this {{if .IsGeneral}}group{{else}}phase{{end}} yet.</p>
+  {{end}}
+
+  {{if $.Accounts}}
+  <form method="post" action="/projects/{{$.Project.ID}}/items" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    {{if not .IsGeneral}}<input type="hidden" name="phase_id" value="{{.Phase.ID}}">{{end}}
+    <input name="name" placeholder="e.g. Oven" required>
+    <input name="estimated_cost" type="text" inputmode="decimal" placeholder="0.00">
+    <select name="essential">
+      <option value="1">Must-have</option>
+      <option value="0">Nice-to-have</option>
+    </select>
+    <button type="submit" class="primary">Add item</button>
+  </form>
+  {{else}}
+  <p class="muted small">Add an <a href="/accounts/new">account</a> first so you can record purchases.</p>
+  {{end}}
+
+  {{if and $.HasPhases (not .IsGeneral)}}
+  <form method="post" action="/projects/{{$.Project.ID}}/phases/{{.Phase.ID}}/delete" style="margin-top:8px">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit" class="linklike danger">Delete phase (items move to General)</button>
+  </form>
+  {{end}}
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="panel-head"><h2>Loan financing</h2>{{if .LoanFinanced}}<span class="tag">active</span>{{end}}</div>
+  {{if .LoanFinanced}}
+  <p class="muted small">This project is <strong>funded by a loan</strong> — its monthly figure above is the repayment below, and only the deposit comes from savings. Adjust the numbers here, or switch back to saving in <a href="/projects/{{.Project.ID}}/edit">Edit</a>.</p>
+  {{else}}
+  <p class="muted small">A what-if calculator: model funding this project with a loan instead of saving. Enter a deposit, APR, and term to see the monthly payment and interest. To actually finance it this way, choose <em>Loan</em> in <a href="/projects/{{.Project.ID}}/edit">Edit</a>.</p>
+  {{end}}
+  <form method="post" action="/projects/{{.Project.ID}}/loan" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label style="margin:0">Deposit <input name="loan_deposit" type="text" inputmode="decimal" value="{{printf "%g" .Project.LoanDeposit}}" placeholder="0.00"></label>
+    <label style="margin:0">APR % <input name="loan_apr" type="text" inputmode="decimal" value="{{printf "%g" .Project.LoanAPR}}" placeholder="0.0"></label>
+    <label style="margin:0">Term (months) <input name="loan_term_months" type="text" inputmode="numeric" value="{{if .Project.LoanTermMonths}}{{.Project.LoanTermMonths}}{{end}}" placeholder="60"></label>
+    <label style="margin:0">Starts <input type="date" name="loan_start_date" value="{{.Project.LoanStartDate}}"></label>
+    <button type="submit" class="primary">Calculate</button>
+  </form>
+  {{if .HasLoan}}
+  <div class="kpis" style="margin-top:10px">
+    <div><span class="k">Borrow</span><span class="v">{{eur .Loan.Principal}}</span></div>
+    <div><span class="k">Monthly · {{.Loan.TermMonths}} mo</span><span class="v">{{eur .Loan.Monthly}}</span></div>
+    <div><span class="k">Interest lost</span><span class="v neg">{{eur .Loan.TotalInterest}}</span></div>
+    <div><span class="k">Total repaid</span><span class="v">{{eur .Loan.TotalRepaid}}</span></div>
+  </div>
+  <p class="muted small">
+    Budget {{eur .Plan.Target}}: {{eur .Loan.Deposit}} deposit + {{eur .Loan.Principal}} borrowed at {{printf "%g" .Loan.APR}}% over {{.Loan.TermMonths}} months.
+    You'd repay {{eur .Loan.TotalRepaid}} ({{eur .Loan.TotalInterest}} interest), so the project costs {{eur .Loan.TotalCost}} all-in — {{eur .Loan.TotalInterest}} more than paying cash.
+  </p>
+  {{end}}
+
+  {{if or (and .LoanFinanced .Project.LoanDeposit) .Project.DepositPaid}}
+  <div class="panel-head" style="margin-top:14px"><h2>Deposit</h2>{{if not .DepositRemaining}}{{if .Project.DepositPaid}}<span class="tag">paid</span>{{end}}{{else if .Project.DepositPaid}}<span class="tag">part-paid</span>{{end}}</div>
+
+  <div class="kpis" style="margin-bottom:8px">
+    <div><span class="k">Planned</span><span class="v">{{eur .Project.LoanDeposit}}</span></div>
+    <div><span class="k">Paid so far</span><span class="v">{{eur .Project.DepositPaid}}</span></div>
+    <div><span class="k">Remaining</span><span class="v">{{eur .DepositRemaining}}</span></div>
+  </div>
+
+  {{if .DepositPayments}}
+  <table class="table" style="margin-bottom:8px">
+    <thead><tr><th>Payment</th><th>Account</th><th class="num">Amount</th></tr></thead>
+    <tbody>
+    {{range .DepositPayments}}
+      <tr><td>{{.Date}}</td><td class="muted">{{.Account}}</td><td class="num">{{eur .Amount}}</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+
+  {{if and .DepositRemaining .LoanFinanced}}
+  <p class="muted small">Pay the deposit in one go or in parts — each payment writes a real expense tagged to this project, so your balance and net worth stay truthful. Payments can be edited or deleted like any transaction; the totals here follow the ledger.</p>
+  {{if .Accounts}}
+  <form method="post" action="/projects/{{.Project.ID}}/deposit" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <select name="account_id" aria-label="Account">
+      {{range .Accounts}}<option value="{{.ID}}" {{if and $.Project.AccountID.Valid (eq $.Project.AccountID.Int64 .ID)}}selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <input type="date" name="date" value="{{today}}" required>
+    <input name="amount" type="text" inputmode="decimal" value="{{printf "%.2f" .DepositRemaining}}" required>
+    <select name="category_id" aria-label="Category">
+      <option value="">— No category —</option>
+      {{range .Categories}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+    </select>
+    <button type="submit" class="primary">Record payment</button>
+  </form>
+  {{end}}
+  {{else if and .Project.DepositPaid (not .DepositRemaining)}}
+  <p class="muted small">Deposit fully paid (last payment {{.Project.DepositPaidDate}}) — balances and net worth already reflect it. Editing or deleting any of the payments above updates these figures automatically.</p>
+  {{else if .Project.DepositPaid}}
+  <p class="muted small">{{eur .Project.DepositPaid}} paid so far. This project is no longer loan-financed, so further deposit payments are disabled — switch back to <em>Loan</em> in <a href="/projects/{{.Project.ID}}/edit">Edit</a> to continue paying.</p>
+  {{end}}
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Add a phase</h2></div>
+  <p class="muted small">Split this project into dated milestones — each phase gets its own saving target, and the monthly figures above add up across phases.</p>
+  <form method="post" action="/projects/{{.Project.ID}}/phases" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input name="name" placeholder="e.g. Cabinets" required>
+    <input type="date" name="target_date">
+    <button type="submit" class="primary">Add phase</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Manage</h2></div>
+  <form method="post" action="/projects/{{.Project.ID}}/status" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    {{$st := .Project.Status}}
+    <select name="status">
+      <option value="planning" {{if eq $st "planning"}}selected{{end}}>Planning</option>
+      <option value="saving" {{if eq $st "saving"}}selected{{end}}>Saving</option>
+      <option value="completed" {{if eq $st "completed"}}selected{{end}}>Completed</option>
+      <option value="archived" {{if eq $st "archived"}}selected{{end}}>Archived</option>
+    </select>
+    <button type="submit" class="primary">Update status</button>
+  </form>
+  <form method="post" action="/projects/{{.Project.ID}}/delete" class="signout">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" class="linklike danger">Delete project</button>
+  </form>
+</section>
+{{end}}

@@ -1,0 +1,27 @@
+{{define "title"}}Join · Lira{{end}}
+{{define "content"}}
+<div class="authcard">
+{{if .Invalid}}
+  <h1 class="display">Invite not valid</h1>
+  <p class="muted">This invite link is invalid, already used, or has expired. Ask the household admin to send you a fresh one.</p>
+  <p class="muted small"><a href="/login">Go to sign in</a></p>
+{{else}}
+  <h1 class="display">Join the household</h1>
+  <p class="muted">{{if .Label}}You've been invited as <strong>{{.Label}}</strong>. {{end}}Choose a username and password — two-factor setup comes next.</p>
+  <form method="post" action="/invite/{{.Token}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Username
+      <input name="username" autocomplete="username" value="{{with .Username}}{{.}}{{end}}" required autofocus>
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="new-password" required minlength="8">
+    </label>
+    <label>Confirm password
+      <input type="password" name="confirm" autocomplete="new-password" required minlength="8">
+    </label>
+    <button type="submit" class="primary">Create account</button>
+  </form>
+  <p class="muted small">Already have an account? <a href="/login">Sign in</a></p>
+{{end}}
+</div>
+{{end}}

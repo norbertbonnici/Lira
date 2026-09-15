@@ -1,0 +1,23 @@
+{{define "title"}}Edit category · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Edit category</h1>
+  <form method="post" action="/categories/{{.Category.ID}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Category.Name}}" required autofocus>
+    </label>
+    {{$k := .Category.Kind}}
+    <label>Kind
+      <select name="kind">
+        <option value="expense" {{if eq $k "expense"}}selected{{end}}>expense</option>
+        <option value="income" {{if eq $k "income"}}selected{{end}}>income</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/categories">Cancel</a>
+    </div>
+  </form>
+</div>
+{{end}}

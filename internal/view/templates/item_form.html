@@ -1,0 +1,28 @@
+{{define "title"}}Edit item · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Edit item</h1>
+  <form method="post" action="/projects/{{.ProjectID}}/items/{{.Item.ID}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Item.Name}}" required autofocus>
+    </label>
+    <div class="row2">
+      <label>Estimated cost
+        <input name="estimated_cost" type="text" inputmode="decimal" value="{{printf "%.2f" .Item.EstimatedCost}}">
+      </label>
+      {{$e := .Item.Essential}}
+      <label>Type
+        <select name="essential">
+          <option value="1" {{if $e}}selected{{end}}>Must-have</option>
+          <option value="0" {{if not $e}}selected{{end}}>Nice-to-have</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/projects/{{.ProjectID}}">Cancel</a>
+    </div>
+  </form>
+</div>
+{{end}}

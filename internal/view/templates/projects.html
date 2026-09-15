@@ -1,0 +1,39 @@
+{{define "title"}}Projects · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Projects</h1>
+  <a class="primary button" href="/projects/new">+ New project</a>
+</div>
+
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">Net worth</span><span class="v">{{eur .NAV}}</span></div>
+    <div><span class="k">Liquid cash</span><span class="v">{{eur .Cash}}</span></div>
+    <div><span class="k">Committed to projects</span><span class="v">{{eur .Committed}}</span></div>
+    <div><span class="k">Uncommitted</span><span class="v {{signClass .Uncommitted}}">{{eur .Uncommitted}}</span></div>
+  </div>
+  <p class="muted small">“Committed” is the share of each active project you've chosen to finance from existing savings.</p>
+</section>
+
+{{if .Cards}}
+{{range .Cards}}
+<section class="panel">
+  {{$loan := and (eq .FinanceMethod "loan") .LoanTermMonths}}
+  <div class="panel-head">
+    <h2><a href="/projects/{{.ID}}">{{.Name}}</a> <span class="tag">{{.Status}}</span>{{if $loan}} <span class="tag">loan</span>{{end}}</h2>
+    <span class="muted small">{{if $loan}}{{if .LoanTermMonths}}{{.LoanTermMonths}}-month loan @ {{printf "%g" .LoanAPR}}%{{end}}{{else}}{{if .TargetDate}}by {{.TargetDate}}{{else}}no target date{{end}}{{end}}</span>
+  </div>
+  <div class="bar-track"><div class="bar-fill" style="width: {{pct .Plan.Spent .Plan.Target}}%"></div></div>
+  <div class="kpis" style="margin-top:12px">
+    <div><span class="k">Budget</span><span class="v">{{eur .Plan.Target}}</span></div>
+    <div><span class="k">Spent</span><span class="v">{{eur .Plan.Spent}}</span></div>
+    <div><span class="k">{{if $loan}}Deposit{{if .DepositPaid}}{{if lt .DepositPaid .LoanDeposit}} · part-paid{{else}} · paid{{end}}{{end}}{{else}}From savings{{end}}</span><span class="v">{{if and $loan .DepositPaid}}{{eur .DepositPaid}}{{else}}{{eur .Plan.Financed}}{{end}}</span></div>
+    <div><span class="k">{{if $loan}}Loan{{if .Plan.LoanStart}} / month{{else if .Plan.MonthsLeft}} / month ({{.Plan.MonthsLeft}} mo){{end}}{{else}}{{if .Plan.Overdue}}Still to fund{{else}}Save / month{{if .Plan.MonthsLeft}} ({{.Plan.MonthsLeft}} mo){{end}}{{end}}{{end}}</span><span class="v">{{if and $loan .Plan.LoanStart}}{{eur .Plan.UpcomingMonthly}} from {{.Plan.LoanStart}}{{else if and $loan (not .Plan.MonthsLeft)}}repaid ✓{{else if and (not $loan) .Plan.Overdue}}{{eur .Plan.ToSave}}{{else}}{{eur .Plan.MonthlyToSave}}{{end}}</span></div>
+  </div>
+  {{if and (not $loan) .Plan.Overdue}}<p class="small neg">Target date has passed — {{eur .Plan.ToSave}} still to fund.</p>{{end}}
+</section>
+{{end}}
+{{else}}
+<p class="empty">No projects yet. <a href="/projects/new">Plan your first one.</a></p>
+{{end}}
+{{end}}

@@ -1,0 +1,73 @@
+{{define "title"}}{{.Heading}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">{{.Heading}}</h1>
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Project.Name}}" placeholder="e.g. Kitchen remodel" required autofocus>
+    </label>
+    <div class="row2">
+      <label>Target purchase date
+        <input type="date" name="target_date" value="{{.Project.TargetDate}}">
+      </label>
+      {{$st := .Project.Status}}
+      <label>Status
+        <select name="status">
+          <option value="planning" {{if eq $st "planning"}}selected{{end}}>Planning</option>
+          <option value="saving" {{if eq $st "saving"}}selected{{end}}>Saving</option>
+          <option value="completed" {{if eq $st "completed"}}selected{{end}}>Completed</option>
+          <option value="archived" {{if eq $st "archived"}}selected{{end}}>Archived</option>
+        </select>
+      </label>
+    </div>
+    {{$m := .Project.FinanceMethod}}
+    <label>Financing method
+      <select name="finance_method">
+        <option value="save" {{if ne $m "loan"}}selected{{end}}>Save up — spread the cost over the months to the target date</option>
+        <option value="loan" {{if eq $m "loan"}}selected{{end}}>Loan — borrow the budget and repay monthly</option>
+      </select>
+    </label>
+    <fieldset class="subform">
+      <legend>If saving up</legend>
+      <div class="row2">
+        <label>Finance from savings (%)
+          <input name="finance_pct" type="text" inputmode="decimal" value="{{printf "%g" .Project.FinancePct}}">
+        </label>
+        <label>Contingency buffer (%)
+          <input name="buffer_pct" type="text" inputmode="decimal" value="{{printf "%g" .Project.BufferPct}}">
+        </label>
+      </div>
+    </fieldset>
+    <fieldset class="subform">
+      <legend>If financing with a loan</legend>
+      <div class="row3">
+        <label>Deposit
+          <input name="loan_deposit" type="text" inputmode="decimal" value="{{printf "%g" .Project.LoanDeposit}}" placeholder="0.00">
+        </label>
+        <label>APR (%)
+          <input name="loan_apr" type="text" inputmode="decimal" value="{{printf "%g" .Project.LoanAPR}}" placeholder="0.0">
+        </label>
+        <label>Term (months)
+          <input name="loan_term_months" type="text" inputmode="numeric" value="{{if .Project.LoanTermMonths}}{{.Project.LoanTermMonths}}{{end}}" placeholder="60">
+        </label>
+      </div>
+      <label>Repayments start (optional)
+        <input type="date" name="loan_start_date" value="{{.Project.LoanStartDate}}">
+      </label>
+      <p class="muted small">Until this date the monthly repayment is not deducted from your budget; leave empty if the loan starts right away.</p>
+    </fieldset>
+    <label>Default purchase account
+      <select name="account_id">
+        <option value="">— None —</option>
+        {{range .Accounts}}<option value="{{.ID}}" {{if and $.Project.AccountID.Valid (eq $.Project.AccountID.Int64 .ID)}}selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/projects">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">The budget is the sum of your line-items (plus the buffer). After saving, add <strong>phases</strong> (dated milestones) and the items that belong to each. With <strong>Save up</strong>, “Finance from savings” is how much you'll cover from money you already have — the rest is spread across the months to each phase's date. With a <strong>Loan</strong>, the project's monthly figure becomes the amortized loan payment (budget − deposit, over the term) instead, and only the deposit is drawn from savings.</p>
+</div>
+{{end}}

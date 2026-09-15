@@ -1,0 +1,58 @@
+{{define "title"}}Pay for {{.Item.Name}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Pay for “{{.Item.Name}}”</h1>
+  <p class="muted">Records an expense from the account you pick and tags it to {{.Project.Name}}, so your balance and net worth update automatically. Pay a deposit now and the balance later — no need to split the item.</p>
+
+  <div class="kpis" style="margin:12px 0">
+    <div><span class="k">Estimate</span><span class="v">{{eur .Item.EstimatedCost}}</span></div>
+    <div><span class="k">Paid so far</span><span class="v">{{eur .Item.AmountPaid}}</span></div>
+    <div><span class="k">Remaining</span><span class="v">{{eur .Remaining}}</span></div>
+  </div>
+
+  {{if .Payments}}
+  <table class="table" style="margin-bottom:12px">
+    <thead><tr><th>Payment</th><th>Account</th><th class="num">Amount</th></tr></thead>
+    <tbody>
+    {{range .Payments}}
+      <tr><td>{{.Date}}</td><td class="muted">{{.Account}}</td><td class="num">{{eur .Amount}}</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+
+  {{if .Error}}<p class="neg">{{.Error}}</p>{{end}}
+  <form method="post" action="/projects/{{.Project.ID}}/items/{{.Item.ID}}/purchase">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <div class="row2">
+      <label>Account
+        <select name="account_id" required>
+          {{range .Accounts}}<option value="{{.ID}}" {{if and $.Project.AccountID.Valid (eq $.Project.AccountID.Int64 .ID)}}selected{{end}}>{{.Name}}</option>{{end}}
+        </select>
+      </label>
+      <label>Date
+        <input type="date" name="date" value="{{today}}" required>
+      </label>
+    </div>
+    <div class="row2">
+      <label>Amount to pay now
+        <input name="amount" type="text" inputmode="decimal" value="{{printf "%.2f" .Remaining}}" required>
+      </label>
+      <label>Category
+        <select name="category_id">
+          <option value="">— None —</option>
+          {{range .Categories}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <label class="check">
+      <input type="checkbox" name="final" value="1"> This is the final payment — mark the item fully paid
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Record payment</button>
+      <a class="cancel" href="/projects/{{.Project.ID}}">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">The amount defaults to the remaining balance. For a deposit, lower it and leave “final payment” unticked — the item completes automatically once it’s fully paid.</p>
+</div>
+{{end}}

@@ -1,0 +1,49 @@
+{{define "title"}}{{.Heading}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">{{.Heading}}</h1>
+  {{if .Accounts}}
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <div class="row2">
+      <label>Account
+        <select name="account_id" required>
+          {{range .Accounts}}<option value="{{.ID}}" {{if eq $.SelAccount .ID}}selected{{end}}>{{.Name}}</option>{{end}}
+        </select>
+      </label>
+      <label>Date
+        <input type="date" name="date" value="{{.DateVal}}" required>
+      </label>
+    </div>
+    <fieldset class="seg">
+      <label class="radio"><input type="radio" name="type" value="expense" {{if .IsExpense}}checked{{end}}> Expense</label>
+      <label class="radio"><input type="radio" name="type" value="income" {{if not .IsExpense}}checked{{end}}> Income</label>
+    </fieldset>
+    <div class="row2">
+      <label>Amount
+        <input name="amount" type="text" inputmode="decimal" placeholder="0.00" value="{{.AmountStr}}" required>
+      </label>
+      <label>Category
+        <select name="category_id">
+          <option value="">— None —</option>
+          {{range .Categories}}<option value="{{.ID}}" {{if eq $.SelCategory .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <label>Payee / description
+      <input name="payee" value="{{.Payee}}" placeholder="e.g. BOV, Lidl, salary">
+    </label>
+    <label>Notes
+      <input name="notes" value="{{.Notes}}">
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/transactions">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Pick <em>Expense</em> or <em>Income</em> and enter a positive amount — the sign is applied for you. <a href="/categories">Manage categories</a>.</p>
+  {{else}}
+  <p class="empty">You need at least one account first. <a href="/accounts/new">Create an account.</a></p>
+  {{end}}
+</div>
+{{end}}

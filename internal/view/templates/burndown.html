@@ -1,0 +1,71 @@
+{{define "title"}}Cash burn-down · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Cash burn-down</h1>
+  <span><a class="addlink" href="/forecast">NAV forecast →</a> &nbsp; <a class="addlink" href="/history">History</a></span>
+</div>
+
+<section class="hero">
+  <span class="eyebrow">Spendable cash today</span>
+  <div class="nav-figure">{{eur .StartCash}}</div>
+  <div class="hero-split">
+    <div><span class="k">Saving / month</span><span class="v">{{eur .MonthlyIn}}</span></div>
+    <div><span class="k">In {{.Months}} months</span><span class="v {{signClass .EndBalance}}">{{eur .EndBalance}}</span></div>
+    <div><span class="k">Lowest point</span><span class="v {{signClass .Low}}">{{eur .Low}}{{if .LowDate}} <span class="small muted">({{.LowDate}})</span>{{end}}</span></div>
+  </div>
+  {{if .GoesNegative}}
+  <p class="small neg">Heads up: your cash dips below zero around {{.LowDate}} — you'd need to sell investments, save more, or push a purchase out.</p>
+  {{else if .NoSavings}}
+  <p class="muted small">Set a <a href="/settings">monthly saving</a> to see your cash recover after each spend.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Cash month by month</h2></div>
+  {{burndownChart .Chart}}
+  <p class="muted small">Starts at your current cash, adds {{eur .MonthlyIn}}/month, and drops by each project's remaining budget on its target date (dots). Investments are excluded — this is spendable cash. An unpaid loan deposit shows as a lump at the loan's start date{{if .HasLoanOuts}}, and a loan that hasn't started yet deducts its monthly repayment from the projected saving once it begins (running loans are already inside your monthly budget){{end}}.</p>
+  <form method="get" action="/burndown" class="addrow" style="margin-top:6px">
+    <label style="margin:0">Horizon (months)
+      <input name="months" type="text" inputmode="numeric" value="{{.Months}}">
+    </label>
+    <button type="submit" class="primary">Update</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Cash timeline</h2></div>
+  {{if .Ledger}}
+  <table class="table">
+    <thead><tr><th>Event</th><th>When</th><th class="num">Change</th><th class="num">Cash</th></tr></thead>
+    <tbody>
+    {{range .Ledger}}
+      {{if eq .Kind "save"}}
+      <tr>
+        <td class="muted">{{.Label}}{{if gt .Months 1}} <span class="small">× {{.Months}} mo</span>{{end}}</td>
+        <td class="muted">to {{.When}}</td>
+        <td class="num {{signClass .Amount}}">{{if ge .Amount 0.0}}＋{{end}}{{eur .Amount}}</td>
+        <td class="num {{signClass .Balance}}">{{eur .Balance}}</td>
+      </tr>
+      {{else}}
+      <tr>
+        <td>{{.Label}}</td>
+        <td class="muted">{{.When}}</td>
+        <td class="num neg">−{{eur .Amount}}</td>
+        <td class="num {{signClass .Balance}}">{{eur .Balance}}</td>
+      </tr>
+      {{end}}
+    {{end}}
+    </tbody>
+  </table>
+  <p class="muted small">Green rows are the saving that accrues between purchases; red rows are project spends{{if .HasLoanOuts}} and upcoming loan repayments (shown per stretch, and continuing to the end of the horizon after the last purchase){{end}}. The running <strong>Cash</strong> column compounds them all, so it's what you'd actually have after each event.</p>
+  {{else}}
+  <p class="empty">No dated project spends ahead. Add a <a href="/projects/new">project</a> with a target date (e.g. a €80,000 purchase 2 months out) to see it draw your cash down.</p>
+  {{end}}
+  {{if or .Undated .Beyond}}
+  <p class="muted small">
+    {{if .Undated}}{{.Undated}} project group(s) without a target date aren't shown.{{end}}
+    {{if .Beyond}} {{.Beyond}} spend(s) fall beyond the {{.Months}}-month horizon.{{end}}
+  </p>
+  {{end}}
+</section>
+{{end}}

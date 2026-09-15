@@ -1,0 +1,115 @@
+{{define "title"}}Pocket money · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Pocket money</h1>
+  <span class="muted small">Private to you — {{.User.Username}}</span>
+</div>
+
+<section class="hero">
+  <span class="eyebrow">Your fund</span>
+  <div class="nav-figure {{signClass .Balance}}">{{eur .Balance}}</div>
+  <div class="hero-split">
+    <div><span class="k">Topped up</span><span class="v pos">{{eur .ToppedUp}}</span></div>
+    <div><span class="k">Spent</span><span class="v neg">{{eur .Spent}}</span></div>
+  </div>
+  <p class="muted small">Only you can see this. It's separate from the household accounts and net worth — your beers, subscriptions, and work lunches stay yours.</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Add to your fund</h2></div>
+  <form method="post" action="/pocket" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <select name="kind" aria-label="Type">
+      <option value="topup">Top up</option>
+      <option value="spend">Spend</option>
+    </select>
+    <input name="amount" type="text" inputmode="decimal" placeholder="0.00" required>
+    <input name="category" type="text" placeholder="e.g. Beers, Subscriptions, Work food">
+    <input name="note" type="text" placeholder="note (optional)">
+    <input name="date" type="date" value="{{.DateVal}}">
+    <button type="submit" class="primary">Add</button>
+  </form>
+</section>
+
+{{if .Categories}}
+<section class="panel">
+  <div class="panel-head"><h2>Where it goes</h2></div>
+  <table class="table">
+    <tbody>
+    {{range .Categories}}
+      <tr>
+        <td>{{.Category}}</td>
+        <td class="barcell"><div class="bar-track"><div class="bar-fill" style="width: {{pct .Amount $.TopCat}}%"></div></div></td>
+        <td class="num">{{eur .Amount}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="panel-head"><h2>History</h2></div>
+  {{if .Entries}}
+  <table class="table">
+    <thead><tr><th>Date</th><th>Category</th><th>Note</th><th class="num">Amount</th><th></th></tr></thead>
+    <tbody>
+    {{range .Entries}}
+      <tr>
+        <td>{{.Date}}</td>
+        <td>{{if .Category}}{{.Category}}{{else}}<span class="muted">—</span>{{end}}</td>
+        <td class="muted">{{if .Note}}{{.Note}}{{else}}—{{end}}</td>
+        <td class="num {{signClass .Amount}}">{{if gt .Amount 0.0}}+{{end}}{{eur .Amount}}</td>
+        <td class="rowact">
+          <form method="post" action="/pocket/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">Nothing yet. Top up your fund above to start tracking your pocket money.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>API access</h2></div>
+  {{if .NewToken}}
+  <p class="muted small">Copy this now — it's shown once and can't be recovered. Send it as a bearer token: <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+  <div class="secretbox">
+    <input class="invite-link" type="text" value="{{.NewToken}}" readonly>
+  </div>
+  {{end}}
+  <p class="muted small">Personal tokens let a device (e.g. the iOS app) read and write <strong>your</strong> data through the JSON API at <code>/api/v1</code> — including your private pocket money, which only your own tokens can see.</p>
+  <form method="post" action="/tokens" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="hidden" name="from" value="pocket">
+    <input name="name" placeholder="e.g. iPhone" maxlength="40">
+    <button type="submit" class="primary">Generate token</button>
+  </form>
+  {{if .Tokens}}
+  <table class="rows">
+    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <tbody>
+    {{range .Tokens}}
+      <tr>
+        <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">Unnamed</span>{{end}}</td>
+        <td class="muted small">{{.CreatedAt}}</td>
+        <td class="muted small">{{if .LastUsedAt}}{{.LastUsedAt}}{{else}}never{{end}}</td>
+        <td class="rowact">
+          <form method="post" action="/tokens/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <input type="hidden" name="from" value="pocket">
+            <button type="submit" class="linklike danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</section>
+{{end}}

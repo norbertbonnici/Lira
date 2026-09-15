@@ -1,0 +1,177 @@
+{{define "title"}}Dashboard · Lira{{end}}
+{{define "content"}}
+<section class="hero">
+  <span class="eyebrow">Net worth</span>
+  <div class="hero-main">
+    <div class="hero-figures">
+      <div class="nav-figure {{signClass .NAV}}">{{eur .NAV}}</div>
+      {{if .HasChange}}
+      <div class="change {{signClass .MonthlyChange}}">
+        {{if gt .MonthlyChange 0.0}}↑{{else if lt .MonthlyChange 0.0}}↓{{else}}→{{end}}
+        {{eur .MonthlyChange}}{{if .MonthlyChangePct}} <span class="small">({{printf "%+.1f" .MonthlyChangePct}}%)</span>{{end}} this month
+      </div>
+      {{end}}
+      <div class="alloc-legend">
+        <span><i class="dot dot-cash"></i> Cash{{if .CashPct}} {{.CashPct}}%{{end}}</span>
+        <span><i class="dot dot-inv"></i> Investments{{if .InvPct}} {{.InvPct}}%{{end}}</span>
+      </div>
+    </div>
+    {{if gt .NAV 0.0}}<div class="donut-wrap">{{donut .Alloc}}{{if .InvPct}}<span class="donut-center">{{.InvPct}}%<small>invested</small></span>{{end}}</div>{{end}}
+  </div>
+  <div class="hero-split">
+    <div><span class="k">Cash</span><span class="v">{{eur .Cash}}</span></div>
+    <div><span class="k">Investments</span><span class="v">{{eur .Investments}}</span></div>
+  </div>
+</section>
+
+{{if .BillsDueCount}}
+<div class="alert flash"><strong>{{.BillsDueCount}}</strong> bill{{if ne .BillsDueCount 1}}s{{end}} ({{eur .BillsDueTotal}}) due in the next 7 days — <a href="/costs">view costs</a>.</div>
+{{end}}
+{{if .BudgetOver}}
+<div class="alert flash neg"><strong>{{.BudgetOver}}</strong> budget{{if ne .BudgetOver 1}}s{{end}} over limit this month — <a href="/costs">view costs</a>.</div>
+{{end}}
+{{if .BudgetLow}}
+<div class="alert flash"><strong>{{.BudgetLow}}</strong> budget{{if ne .BudgetLow 1}}s{{end}} running low (≥90%) — <a href="/costs">view costs</a>.</div>
+{{end}}
+
+{{if or .HasSavings .HasPortfolio .HasNextBill .HasBudget}}
+<div class="widgetgrid">
+  {{if .HasSavings}}
+  <a class="widget" href="/insights">
+    <span class="wlabel">💰 Saved this month</span>
+    <span class="wval pos">{{eur .SavedThisMonth}}</span>
+    <span class="wsub">{{.SavingsRate}}% of income</span>
+  </a>
+  {{end}}
+  {{if .HasPortfolio}}
+  <a class="widget" href="/holdings">
+    <span class="wlabel">📈 Portfolio</span>
+    <span class="wval {{if lt .PortfolioGainPct 0.0}}neg{{else}}pos{{end}}">{{printf "%+.1f" .PortfolioGainPct}}%</span>
+    <span class="wsub">{{eur .PortfolioValue}} value</span>
+  </a>
+  {{end}}
+  {{if .HasNextBill}}
+  <a class="widget" href="/costs">
+    <span class="wlabel">⚡ Next bill</span>
+    <span class="wval">{{eur .NextBillAmount}}</span>
+    <span class="wsub">{{.NextBillName}} · {{if .HasNextBill}}{{if le .NextBillDays 0}}due today{{else}}in {{.NextBillDays}}d{{end}}{{end}}</span>
+  </a>
+  {{end}}
+  {{if .HasBudget}}
+  <a class="widget" href="/costs">
+    <span class="wlabel">🗓️ Available / mo</span>
+    <span class="wval {{signClass .BudgetAvailable}}">{{eur .BudgetAvailable}}</span>
+    <span class="wsub">after costs &amp; funding</span>
+  </a>
+  {{end}}
+</div>
+{{end}}
+
+{{if .HasBudget}}
+<section class="panel">
+  <div class="panel-head"><h2>Monthly budget</h2><a class="addlink" href="/costs">Costs →</a></div>
+  <table class="rows budgetbreak">
+    <tbody>
+      <tr><td>Income</td><td class="num">{{eur .BudgetIncome}}</td></tr>
+      <tr><td class="muted">Operating costs</td><td class="num neg">−{{eur .BudgetOperating}}</td></tr>
+      <tr><td class="muted">Project funding</td><td class="num neg">−{{eur .BudgetSavings}}</td></tr>
+      <tr class="brk-total"><td>Available</td><td class="num {{signClass .BudgetAvailable}}">{{eur .BudgetAvailable}}</td></tr>
+    </tbody>
+  </table>
+  {{if .AllocatedPct}}
+  <div class="bar-track"><div class="bar-fill {{if gt .AllocatedPct 100}}over{{end}}" style="width: {{if gt .AllocatedPct 100}}100{{else}}{{.AllocatedPct}}{{end}}%"></div></div>
+  <p class="muted small">{{.AllocatedPct}}% of income allocated to costs &amp; funding.{{if .HasSpark}} Net trend: <span class="spark-inline {{signClass .SavedThisMonth}}">{{sparkline .NetSpark}}</span>{{end}}</p>
+  {{end}}
+</section>
+{{end}}
+
+{{if .HasHistory}}
+<section class="panel">
+  <div class="panel-head"><h2>Net worth history</h2><a class="addlink" href="/history">View all →</a></div>
+  <div class="chartwrap">{{chart .Chart}}</div>
+  <div class="legend">
+    <span><i class="sw sw-inv"></i> Investments</span>
+    <span><i class="sw sw-cash"></i> Cash</span>
+  </div>
+</section>
+{{end}}
+
+<div class="grid2">
+  <section class="panel">
+    <div class="panel-head"><h2>Accounts</h2><a class="addlink" href="/accounts/new">+ Add</a></div>
+    {{if .Accounts}}
+    <table class="rows">
+      <tbody>
+      {{range .Accounts}}
+        <tr>
+          <td><a href="/accounts/{{.ID}}/edit">{{.Name}}</a> <span class="tag">{{.Type}}</span></td>
+          <td class="num {{signClass .Balance}}">{{eur .Balance}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No accounts yet. <a href="/accounts/new">Add your first account.</a></p>
+    {{end}}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Investments</h2><a class="addlink" href="/holdings/new">+ Add</a></div>
+    {{if .Holdings}}
+    <table class="rows">
+      <tbody>
+      {{range .Holdings}}
+        <tr>
+          <td><a href="/holdings/{{.ID}}/edit">{{.Symbol}}</a> <span class="tag">{{.Kind}}</span></td>
+          <td class="num">{{money .Value .Currency}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No holdings yet. <a href="/holdings/new">Add an investment.</a></p>
+    {{end}}
+  </section>
+</div>
+
+{{if .Projects}}
+<section class="panel">
+  <div class="panel-head"><h2>Projects</h2><a class="addlink" href="/projects">View all →</a></div>
+  <table class="rows">
+    <tbody>
+    {{range .Projects}}
+      <tr>
+        <td>
+          <a href="/projects/{{.ID}}">{{.Name}}</a>
+          <div class="bar-track"><div class="bar-fill" style="width: {{pct .Plan.Spent .Plan.Target}}%"></div></div>
+        </td>
+        <td class="num">{{eur .Plan.Target}}</td>
+        <td class="num muted">{{if and (eq .FinanceMethod "loan") .LoanTermMonths}}{{if .Plan.LoanStart}}{{eur .Plan.UpcomingMonthly}}/mo loan from {{.Plan.LoanStart}}{{else if .Plan.MonthsLeft}}{{eur .Plan.MonthlyToSave}}/mo loan{{else}}loan repaid{{end}}{{else if .Plan.Overdue}}due now{{else}}{{eur .Plan.MonthlyToSave}}/mo{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="panel-head"><h2>Recent transactions</h2><a class="addlink" href="/transactions/new">+ Add</a></div>
+  {{if .Transactions}}
+  <table class="rows tx">
+    <tbody>
+    {{range .Transactions}}
+      <tr>
+        <td class="date">{{.Date}}</td>
+        <td>{{if .Payee}}{{.Payee}}{{else}}<span class="muted">—</span>{{end}} <span class="tag">{{.AccountName}}</span></td>
+        <td class="cat muted">{{.CategoryName}}</td>
+        <td class="num {{signClass .Amount}}">{{eur .Amount}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="muted small"><a href="/transactions">View all transactions →</a></p>
+  {{else}}
+  <p class="empty">No transactions yet. <a href="/transactions/new">Record one.</a></p>
+  {{end}}
+</section>
+{{end}}

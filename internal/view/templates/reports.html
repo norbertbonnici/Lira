@@ -1,0 +1,31 @@
+{{define "title"}}Reports · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Reports</h1>
+</div>
+
+<section class="panel">
+  <div class="reportgrid">
+    <a class="reportcard" href="/history">
+      <h2>Net worth history</h2>
+      <p class="muted small">How your cash and investments have moved over time, from daily snapshots.</p>
+    </a>
+    <a class="reportcard" href="/forecast">
+      <h2>Net worth forecast</h2>
+      <p class="muted small">Project NAV forward at your planned vs actual saving rate, against a target.</p>
+    </a>
+    <a class="reportcard" href="/burndown">
+      <h2>Cash burn-down</h2>
+      <p class="muted small">Month-by-month spendable cash as savings build it up and projects draw it down.</p>
+    </a>
+    <a class="reportcard" href="/insights">
+      <h2>Spending insights</h2>
+      <p class="muted small">Where the money goes: category breakdown, 12-month trend, and savings rate.</p>
+    </a>
+    <a class="reportcard" href="/projection">
+      <h2>Investment forecast</h2>
+      <p class="muted small">Compound your portfolio forward with contributions, a FIRE target, and inflation.</p>
+    </a>
+  </div>
+</section>
+{{end}}

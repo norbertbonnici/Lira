@@ -1,0 +1,50 @@
+{{define "title"}}{{.Heading}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">{{.Heading}}</h1>
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{.Cost.Name}}" placeholder="e.g. Netflix, Electricity, Car insurance" required autofocus>
+    </label>
+    <div class="row2">
+      {{$cat := .Cost.Category}}
+      <label>Category
+        <select name="category">
+          {{range .Categories}}<option value="{{.}}" {{if eq . $cat}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </label>
+      {{$f := .Cost.Frequency}}
+      <label>Frequency
+        <select name="frequency">
+          {{range .Frequencies}}<option value="{{.}}" {{if eq . $f}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <div class="row2">
+      <label>Amount
+        <input name="amount" type="text" inputmode="decimal" value="{{printf "%g" .Cost.Amount}}">
+      </label>
+      <label>Currency
+        <input name="currency" value="{{with .Cost.Currency}}{{.}}{{else}}EUR{{end}}" maxlength="3">
+      </label>
+    </div>
+    <label>Due day of month <span class="muted small">(1–31; optional, for the next-payment date)</span>
+      <input name="due_day" type="text" inputmode="numeric" value="{{if .Cost.DueDay}}{{.Cost.DueDay}}{{end}}" placeholder="e.g. 15">
+    </label>
+    <label>Track actuals against <span class="muted small">(optional — turns this cost into a budget)</span>
+      {{$sel := .Cost.CategoryID}}
+      <select name="category_id">
+        <option value="">— No tracking (fixed cost) —</option>
+        {{range .TxCategories}}{{if eq .Kind "expense"}}<option value="{{.ID}}" {{if and $sel.Valid (eq $sel.Int64 .ID)}}selected{{end}}>{{.Name}}</option>{{end}}{{end}}
+      </select>
+    </label>
+    <label class="radio" style="margin-top:18px"><input type="checkbox" name="active" value="1" {{if .Cost.Active}}checked{{end}}> Active (counts toward the monthly total)</label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/costs">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Amounts are normalized to a monthly figure (weekly ×52/12, quarterly ÷3, yearly ÷12). Non-EUR amounts convert via the latest FX rate.</p>
+</div>
+{{end}}

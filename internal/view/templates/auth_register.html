@@ -1,0 +1,26 @@
+{{define "title"}}Register · Lira{{end}}
+{{define "content"}}
+<div class="authcard">
+  <h1 class="display">Create the admin account</h1>
+  {{if .Open}}
+  <p class="muted">This first account is the household admin — you'll invite others from Settings. Two-factor setup comes next.</p>
+  <form method="post" action="/register">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Username
+      <input name="username" autocomplete="username" value="{{with .Username}}{{.}}{{end}}" required autofocus>
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="new-password" required minlength="8">
+    </label>
+    <label>Confirm password
+      <input type="password" name="confirm" autocomplete="new-password" required minlength="8">
+    </label>
+    <button type="submit" class="primary">Create account</button>
+  </form>
+  <p class="muted small">Already registered? <a href="/login">Sign in</a></p>
+  {{else}}
+  <p class="muted">Registration is closed. The admin account already exists — new members join by invitation.</p>
+  <p class="muted small"><a href="/login">Go to sign in</a></p>
+  {{end}}
+</div>
+{{end}}

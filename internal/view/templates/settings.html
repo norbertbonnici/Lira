@@ -1,0 +1,140 @@
+{{define "title"}}Settings · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Settings</h1>
+</div>
+
+{{if .InviteLink}}
+<section class="panel">
+  <div class="panel-head"><h2>New invite link</h2></div>
+  <p class="muted small">Send this one-time link to the person you're inviting — copy it now, it won't be shown again.</p>
+  <div class="secretbox">
+    <input class="invite-link" type="text" value="{{.InviteLink}}" readonly>
+  </div>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="panel-head"><h2>Household</h2></div>
+  <form method="post" action="/settings/household">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Name
+      <input name="name" value="{{with .Household}}{{.Name}}{{end}}" maxlength="60" required>
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Monthly saving</h2></div>
+  <p class="muted small">How much you plan to put aside each month. The <a href="/forecast">net-worth forecast</a> projects your NAV forward at this rate and compares it to what you've actually been saving.{{if gt .Available 0.0}} Your budget currently leaves about <strong>{{eur .Available}}</strong>/month free.{{end}}</p>
+  <form method="post" action="/settings/savings">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Planned saving / month (EUR)
+      <input name="monthly_savings" type="text" inputmode="decimal" value="{{with .Household}}{{printf "%g" .MonthlySavings}}{{end}}">
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Backup</h2></div>
+  <p class="muted small">Download a consistent snapshot of the whole database (one SQLite file). It contains everything — keep it somewhere safe.</p>
+  <a class="primary button" href="/backup">Download backup</a>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>API access</h2></div>
+  {{if .NewToken}}
+  <p class="muted small">Copy this now — it's shown once and can't be recovered. Send it as a bearer token: <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+  <div class="secretbox">
+    <input class="invite-link" type="text" value="{{.NewToken}}" readonly>
+  </div>
+  {{end}}
+  <p class="muted small">Personal tokens let a device (e.g. the iOS app) read and write your data through the JSON API at <code>/api/v1</code>. A token acts as <strong>you</strong> — your private pocket money is only visible to your own tokens.</p>
+  <form method="post" action="/tokens" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="hidden" name="from" value="settings">
+    <input name="name" placeholder="e.g. iPhone" maxlength="40">
+    <button type="submit" class="primary">Generate token</button>
+  </form>
+  {{if .Tokens}}
+  <table class="rows">
+    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <tbody>
+    {{range .Tokens}}
+      <tr>
+        <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">Unnamed</span>{{end}}</td>
+        <td class="muted small">{{.CreatedAt}}</td>
+        <td class="muted small">{{if .LastUsedAt}}{{.LastUsedAt}}{{else}}never{{end}}</td>
+        <td class="rowact">
+          <form method="post" action="/tokens/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <input type="hidden" name="from" value="settings">
+            <button type="submit" class="linklike danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted small">No tokens yet.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Members</h2></div>
+  {{if .Members}}
+  <table class="rows">
+    <tbody>
+    {{range .Members}}
+      <tr>
+        <td>{{.Username}} <span class="tag">{{.Role}}</span></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">No members yet.</p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Invite a member</h2></div>
+  <form method="post" action="/settings/invite">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>Label <span class="muted small">— who is this for? e.g. household member</span>
+      <input name="label" placeholder="e.g. household member" maxlength="40">
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Generate invite link</button>
+    </div>
+  </form>
+
+  {{if .Invites}}
+  <table class="rows">
+    <tbody>
+    {{range .Invites}}
+      <tr>
+        <td>{{if .Label}}{{.Label}}{{else}}<span class="muted">Unlabelled invite</span>{{end}}</td>
+        <td class="muted small">expires {{.ExpiresAt}}</td>
+        <td class="rowact">
+          <form method="post" action="/settings/invite/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted small">No pending invites.</p>
+  {{end}}
+</section>
+{{end}}

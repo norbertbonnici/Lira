@@ -1,0 +1,51 @@
+{{define "title"}}Investments · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Investments</h1>
+  <span>
+    {{if .Refreshable}}
+    <form method="post" action="/refresh" class="moveform">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit" class="linklike">Refresh prices</button>
+    </form>
+    &nbsp;
+    {{end}}
+    <a class="addlink" href="/projection">Forecast</a> &nbsp;
+    <a class="addlink" href="/holdings/export">Export</a> &nbsp;
+    <a class="primary button" href="/holdings/new">+ New holding</a>
+  </span>
+</div>
+{{if .Rows}}
+<table class="table">
+  <thead><tr><th>Symbol</th><th>Name</th><th>Type</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Gain (EUR)</th><th></th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr>
+      <td>{{.Symbol}}</td>
+      <td>{{.Name}}</td>
+      <td>{{.Kind}}</td>
+      <td class="num">{{printf "%g" .Quantity}}</td>
+      <td class="num">{{money .Price .Currency}}</td>
+      <td class="num">{{money .Value .Currency}}</td>
+      <td class="num {{if .HasGain}}{{signClass .GainEUR}}{{end}}">{{if .HasGain}}{{eur .GainEUR}} <span class="small">({{printf "%+.1f" .GainPct}}%)</span>{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="rowact"><a href="/holdings/{{.ID}}/edit">Edit</a></td>
+    </tr>
+  {{end}}
+  </tbody>
+  <tfoot>
+    {{if .ShowFX}}
+    {{range .Currencies}}
+    <tr class="subtot"><td colspan="5" class="muted">Subtotal {{.Currency}}</td><td class="num">{{money .Value .Currency}} <span class="small muted">→ {{eur .ValueEUR}}</span></td><td></td><td></td></tr>
+    {{end}}
+    {{end}}
+    <tr><td colspan="5">Total (EUR)</td><td class="num">{{eur .Total}}</td><td class="num {{if .HasGains}}{{signClass .TotalGain}}{{end}}">{{if .HasGains}}{{eur .TotalGain}} <span class="small">({{printf "%+.1f" .TotalGainPct}}%)</span>{{end}}</td><td></td></tr>
+  </tfoot>
+</table>
+<p class="muted small">
+  {{if .Refreshable}}Prices &amp; EUR rates auto-update via Twelve Data{{if .Updated}}, last {{.Updated}}{{end}}. Use the provider's symbol (e.g. <code>AAPL</code>) for auto-pricing.{{else}}Prices are entered manually — set <code>LIRA_MARKET_API_KEY</code> to auto-fetch prices &amp; EUR rates.{{end}}
+  Per-holding prices and values are shown in each holding's own currency; {{if .ShowFX}}the subtotals convert each currency to EUR, and the{{else}}the{{end}} total is in EUR. Gains are EUR-converted.
+</p>
+{{else}}
+<p class="empty">No holdings yet. <a href="/holdings/new">Add an investment.</a></p>
+{{end}}
+{{end}}

@@ -1,0 +1,75 @@
+{{define "title"}}Growth forecast · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Investment forecast</h1>
+  <a class="addlink" href="/holdings">← Investments</a>
+</div>
+
+<section class="panel">
+  <form method="get" action="/projection" class="kpis" style="align-items:flex-end">
+    <label style="margin:0">Starting amount
+      <input name="start" type="text" inputmode="decimal" value="{{printf "%.0f" .Start}}">
+    </label>
+    <label style="margin:0">Monthly contribution
+      <input name="monthly" type="text" inputmode="decimal" value="{{printf "%.0f" .Monthly}}">
+    </label>
+    <label style="margin:0">Return % / yr
+      <input name="return" type="text" inputmode="decimal" value="{{printf "%g" .Return}}">
+    </label>
+    <label style="margin:0">Years
+      <input name="years" type="text" inputmode="numeric" value="{{.Years}}">
+    </label>
+    <label style="margin:0">FI target (optional)
+      <input name="target" type="text" inputmode="decimal" value="{{printf "%.0f" .Target}}">
+    </label>
+    <label style="margin:0">Inflation % (optional)
+      <input name="inflation" type="text" inputmode="decimal" value="{{printf "%g" .Inflation}}">
+    </label>
+    <button type="submit" class="primary">Update</button>
+  </form>
+  <p class="muted small">Monthly-compounded; contributions added each month. The FI target defaults to 25× your annual operating costs (the 4% rule). Nominal figures unless an inflation rate is set.</p>
+</section>
+
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">In {{.Years}} years</span><span class="v">{{eur .FinalValue}}</span></div>
+    <div><span class="k">You put in</span><span class="v">{{eur .TotalContributed}}</span></div>
+    <div><span class="k">Growth</span><span class="v pos">{{eur .TotalGrowth}}</span></div>
+    {{if .HasInflation}}<div><span class="k">In today's money</span><span class="v">{{eur .RealFinal}}</span></div>{{end}}
+  </div>
+  {{if .HasTarget}}
+  <p class="{{if .FIReached}}pos{{else}}muted{{end}} small">
+    {{if .FIReached}}🎯 Reaches your FI target of {{eur .Target}} in <strong>{{.FIYear}} years</strong> (around {{.FICalendar}}).{{else}}Doesn't reach the FI target of {{eur .Target}} within {{.Years}} years — raise the contribution, return, or horizon.{{end}}
+  </p>
+  {{end}}
+</section>
+
+{{if .HasChart}}
+<section class="panel">
+  <div class="panel-head"><h2>Projected value</h2></div>
+  <div class="chartwrap">{{chart .Chart}}</div>
+  <div class="legend">
+    <span><i class="sw sw-inv"></i> Growth</span>
+    <span><i class="sw sw-cash"></i> Contributions</span>
+    <span class="muted small">Top edge = portfolio value</span>
+  </div>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="panel-head"><h2>Year by year</h2></div>
+  <table class="table">
+    <thead><tr><th>Year</th><th class="num">Contributed</th><th class="num">Growth</th><th class="num">Value</th></tr></thead>
+    <tbody>
+    {{range .Rows}}
+      <tr>
+        <td>{{.Year}}</td>
+        <td class="num">{{eur .Contributed}}</td>
+        <td class="num {{signClass .Growth}}">{{eur .Growth}}</td>
+        <td class="num">{{eur .Value}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

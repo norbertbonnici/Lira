@@ -1,0 +1,71 @@
+{{define "title"}}Map columns · Lira{{end}}
+{{define "content"}}
+<div class="formcard" style="max-width:760px">
+  <h1 class="display">Map columns</h1>
+  <p class="muted small">{{.RowCount}} data row(s). Match your CSV's columns to Lira's fields.</p>
+  <form method="post" action="/transactions/import/commit">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="hidden" name="account_id" value="{{.AccountID}}">
+    <input type="hidden" name="has_header" value="{{if .HasHeader}}1{{end}}">
+    <input type="hidden" name="delim" value="{{.Delim}}">
+    <textarea name="csv" hidden>{{.CSV}}</textarea>
+
+    <div class="row2">
+      <label>Date column
+        <select name="date_col">{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+      </label>
+      <label>Date format
+        <select name="date_layout">{{range .DateLayouts}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
+      </label>
+    </div>
+
+    <fieldset class="seg" style="flex-direction:column;align-items:stretch;gap:12px">
+      <label class="radio"><input type="radio" name="amount_mode" value="single" checked> Single amount column (negative = expense)</label>
+      <div class="row2">
+        <label>Amount column
+          <select name="amount_col">{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+        </label>
+        <label class="radio" style="align-self:end"><input type="checkbox" name="decimal_comma" value="1"> Comma decimals (1.234,56)</label>
+      </div>
+      <label class="radio"><input type="radio" name="amount_mode" value="debitcredit"> Separate debit / credit columns</label>
+      <div class="row2">
+        <label>Debit (money out)
+          <select name="debit_col"><option value="-1">— none —</option>{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+        </label>
+        <label>Credit (money in)
+          <select name="credit_col"><option value="-1">— none —</option>{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+        </label>
+      </div>
+    </fieldset>
+
+    <div class="row2">
+      <label>Payee / description
+        <select name="payee_col"><option value="-1">— none —</option>{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+      </label>
+      <label>Category <span class="muted small">(matched by name)</span>
+        <select name="category_col"><option value="-1">— none —</option>{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+      </label>
+    </div>
+    <label>Notes
+      <select name="notes_col"><option value="-1">— none —</option>{{range .Columns}}<option value="{{.Index}}">{{.Label}}</option>{{end}}</select>
+    </label>
+
+    <label class="radio" style="margin-top:16px"><input type="checkbox" name="skip_dupes" value="1" checked> Skip duplicates already in this account (same date + amount + payee)</label>
+
+    <div class="actions">
+      <button type="submit" class="primary">Import</button>
+      <a class="cancel" href="/transactions">Cancel</a>
+    </div>
+  </form>
+
+  {{if .Preview}}
+  <h2 style="font-family:var(--serif);font-weight:500;font-size:1.1rem;margin:22px 0 6px">Preview</h2>
+  <div style="overflow-x:auto">
+    <table class="table">
+      <thead><tr>{{range .Columns}}<th class="small">{{.Label}}</th>{{end}}</tr></thead>
+      <tbody>{{range .Preview}}<tr>{{range .}}<td class="small">{{.}}</td>{{end}}</tr>{{end}}</tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{end}}

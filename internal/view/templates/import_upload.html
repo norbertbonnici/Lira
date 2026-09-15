@@ -1,0 +1,35 @@
+{{define "title"}}Import CSV · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Import transactions</h1>
+  {{if .Accounts}}
+  <form method="post" action="/transactions/import/preview" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label>CSV file
+      <input type="file" name="file" accept=".csv,text/csv" required autofocus>
+    </label>
+    <label>Import into account
+      <select name="account_id" required>
+        {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <label>Delimiter
+      <select name="delim">
+        <option value="comma">Comma ( , )</option>
+        <option value="semicolon">Semicolon ( ; )</option>
+        <option value="tab">Tab</option>
+      </select>
+    </label>
+    <label class="radio" style="margin-top:16px"><input type="checkbox" name="has_header" value="1" checked> First row is a header</label>
+    {{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
+    <div class="actions">
+      <button type="submit" class="primary">Continue</button>
+      <a class="cancel" href="/transactions">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Upload any bank CSV — you'll map its columns to Lira's fields next. Max 5 MB.</p>
+  {{else}}
+  <p class="empty">Add an <a href="/accounts/new">account</a> first.</p>
+  {{end}}
+</div>
+{{end}}

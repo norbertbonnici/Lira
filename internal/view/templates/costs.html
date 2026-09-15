@@ -1,0 +1,119 @@
+{{define "title"}}Operating costs · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Operating costs</h1>
+  <span><a class="addlink" href="/costs/export">Export</a> &nbsp; <a class="primary button" href="/costs/new">+ New cost</a></span>
+</div>
+
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">Monthly income</span><span class="v">{{eur .Income}}</span></div>
+    <div><span class="k">Operating costs / mo</span><span class="v neg">{{eur .MonthlyTotal}}</span></div>
+    <div><span class="k">Project funding / mo</span><span class="v neg">{{eur .ProjectSavings}}</span></div>
+    <div><span class="k">Available / mo</span><span class="v {{signClass .Available}}">{{eur .Available}}</span></div>
+  </div>
+  <p class="muted small">Available = income − operating costs − project funding (monthly savings <em>and</em> loan repayments). Operating costs are {{eur .AnnualTotal}}/year.</p>
+  <form method="post" action="/costs/income" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label style="margin:0">Monthly net income (EUR)
+      <input name="monthly_income" type="text" inputmode="decimal" value="{{printf "%.2f" .Income}}">
+    </label>
+    <button type="submit" class="primary">Save income</button>
+  </form>
+</section>
+
+{{if .Alerts}}
+<section class="panel">
+  <div class="panel-head"><h2>Budget alerts</h2><span class="muted small">{{.CurMonth}}{{if .OverCount}} · {{.OverCount}} over{{end}}{{if .LowCount}} · {{.LowCount}} running low{{end}}</span></div>
+  <ul class="alertlist">
+  {{range .Alerts}}
+    <li class="{{if eq .State "over"}}neg{{else}}warn{{end}}">
+      <strong>{{.Name}}</strong> — {{eur .Actual}} of {{eur .Budget}} ({{.Pct}}%){{if eq .State "over"}} · over budget{{else}} · running low{{end}}
+    </li>
+  {{end}}
+  </ul>
+  {{if not .SpendingScope}}<p class="muted small">Actuals count spending across all accounts. Mark an account as a <a href="/accounts">spending account</a> to scope budgets to just that account.</p>{{end}}
+</section>
+{{end}}
+
+{{if .HasActuals}}
+<section class="panel">
+  <div class="panel-head"><h2>This month — plan vs actual</h2><span class="muted small">{{.CurMonth}}</span></div>
+  <table class="table">
+    <thead><tr><th></th><th class="num">Planned</th><th class="num">Actual</th></tr></thead>
+    <tbody>
+      <tr><td>Income</td><td class="num">{{eur .Income}}</td><td class="num">{{eur .ActualIncome}}</td></tr>
+      <tr><td>Spending <span class="muted small">(planned = recurring, actual = all)</span></td><td class="num">{{eur .MonthlyTotal}}</td><td class="num {{signClass .SpendVariance}}">{{eur .ActualSpend}}</td></tr>
+      <tr><td>Left over</td><td class="num">{{eur .PlanNet}}</td><td class="num {{signClass .ActualNet}}">{{eur .ActualNet}}</td></tr>
+    </tbody>
+  </table>
+  <p class="muted small">“Planned spending” is your recurring operating costs; “actual” is every transaction this month (transfers excluded). A higher actual means discretionary spending on top of your fixed costs.</p>
+</section>
+{{end}}
+
+{{if .Upcoming}}
+<section class="panel">
+  <div class="panel-head"><h2>Upcoming payments</h2><span class="muted small">{{eur .DueSoon}} due in the next 30 days</span></div>
+  <table class="table">
+    <thead><tr><th>Date</th><th>Name</th><th>Category</th><th class="num">Amount (EUR)</th></tr></thead>
+    <tbody>
+    {{range .Upcoming}}
+      <tr>
+        <td>{{.NextDue}}</td>
+        <td>{{.Name}}</td>
+        <td class="muted">{{.Category}}</td>
+        <td class="num">{{eur .AmountEUR}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+{{if .Groups}}
+{{range .Groups}}
+<section class="panel">
+  <div class="panel-head"><h2>{{.Category}}</h2><span class="muted small">{{eur .Monthly}}/mo</span></div>
+  <table class="table">
+    <thead><tr><th>Name</th><th>Frequency</th><th>Next due</th><th class="num">Amount</th><th class="num">Budget / mo</th><th class="num">Spent this month</th><th></th></tr></thead>
+    <tbody>
+    {{range .Costs}}
+      <tr>
+        <td>{{.Name}}{{if not .Active}} <span class="tag">paused</span>{{end}}{{if .Tracked}} <span class="tag">budget</span>{{end}}</td>
+        <td class="muted">{{.Frequency}}</td>
+        <td class="muted">{{if .NextDue}}{{.NextDue}}{{else}}—{{end}}</td>
+        <td class="num">{{money .Amount .Currency}}</td>
+        <td class="num {{if not .Active}}muted{{end}}">{{eur .MonthlyEUR}}</td>
+        <td class="num">
+          {{if .Tracked}}
+          <span class="{{if eq .State "over"}}neg{{else if eq .State "low"}}warn{{end}}">{{eur .Actual}} <span class="small muted">({{.Pct}}%)</span></span>
+          <div class="bar-track"><div class="bar-fill {{.State}}" style="width: {{pct .Actual .MonthlyEUR}}%"></div></div>
+          {{else}}<span class="muted">—</span>{{end}}
+        </td>
+        <td class="rowact">
+          <a href="/costs/{{.ID}}/edit">Edit</a>
+          <form method="post" action="/costs/{{.ID}}/toggle">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike">{{if .Active}}Pause{{else}}Resume{{end}}</button>
+          </form>
+          <form method="post" action="/costs/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">Total operating / mo</span><span class="v">{{eur .MonthlyTotal}}</span></div>
+    <div><span class="k">Total / year</span><span class="v">{{eur .AnnualTotal}}</span></div>
+  </div>
+</section>
+{{else}}
+<p class="empty">No operating costs yet. <a href="/costs/new">Add your first recurring cost</a> (rent, electricity, Netflix…).</p>
+{{end}}
+{{end}}

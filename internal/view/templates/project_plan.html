@@ -1,0 +1,104 @@
+{{define "title"}}{{.Project.Name}} · Saving plan · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">{{.Project.Name}} <span class="muted">· saving plan</span></h1>
+  <a class="addlink" href="/projects/{{.Project.ID}}">← Back to project</a>
+</div>
+
+{{if .LoanFinanced}}
+<section class="panel">
+  <div class="panel-head"><h2>Loan repayment plan</h2></div>
+  <div class="kpis">
+    <div><span class="k">Budget</span><span class="v">{{eur .Plan.Target}}</span></div>
+    <div><span class="k">Deposit (from savings)</span><span class="v">{{eur .Loan.Deposit}}</span></div>
+    <div><span class="k">Borrowed</span><span class="v">{{eur .Loan.Principal}}</span></div>
+    <div><span class="k">Monthly · {{.Loan.TermMonths}} mo{{if .Plan.LoanStart}} · from {{.Plan.LoanStart}}{{end}}</span><span class="v">{{eur .Loan.Monthly}}</span></div>
+    <div><span class="k">Interest lost</span><span class="v neg">{{eur .Loan.TotalInterest}}</span></div>
+    <div><span class="k">All-in cost</span><span class="v">{{eur .Loan.TotalCost}}</span></div>
+  </div>
+  <p class="muted small">
+    This project is financed by a loan: {{eur .Loan.Deposit}} deposit + {{eur .Loan.Principal}} borrowed at {{printf "%g" .Loan.APR}}% over {{.Loan.TermMonths}} months → {{eur .Loan.Monthly}}/month{{if .Plan.LoanStart}} starting {{.Plan.LoanStart}}{{end}}.
+    You'd repay {{eur .Loan.TotalRepaid}} in total ({{eur .Loan.TotalInterest}} of it interest), so it costs {{eur .Loan.TotalInterest}} more than paying cash.
+    {{if .Project.DepositPaid}}{{eur .Project.DepositPaid}} of the deposit is paid{{if lt .Project.DepositPaid .Project.LoanDeposit}} so far{{end}} — balances already reflect it.{{else}}The deposit leaves {{eur .AfterNAV}} net worth ({{eur .AfterCash}} liquid cash).{{end}}
+  </p>
+</section>
+{{else}}
+<section class="panel">
+  <div class="kpis">
+    <div><span class="k">Budget</span><span class="v">{{eur .Plan.Target}}</span></div>
+    <div><span class="k">Spent ({{pct .Plan.Spent .Plan.Target}}%)</span><span class="v">{{eur .Plan.Spent}}</span></div>
+    <div><span class="k">From savings ({{printf "%g" .Project.FinancePct}}%)</span><span class="v">{{eur .Plan.Financed}}</span></div>
+    <div><span class="k">To save</span><span class="v">{{eur .Plan.ToSave}}</span></div>
+    <div><span class="k">Save now / month</span><span class="v">{{eur .Plan.MonthlyToSave}}</span></div>
+    {{if .DueNow}}<div><span class="k">Due now (overdue)</span><span class="v neg">{{eur .DueNow}}</span></div>{{end}}
+  </div>
+  <p class="muted small">
+    Financing {{eur .Plan.Financed}} from savings would leave {{eur .AfterNAV}} net worth ({{eur .AfterCash}} liquid cash).
+    {{if .FinalDate}} Final milestone: {{.FinalDate}}.{{end}}
+    The monthly figure steps down as each phase's date passes — see the schedule below.
+  </p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Phases</h2></div>
+  <table class="table">
+    <thead><tr>
+      <th>Phase</th><th>Target</th><th class="num">Mo&nbsp;left</th>
+      <th class="num">Budget</th><th class="num">Spent</th>
+      <th class="num">From savings</th><th class="num">To save</th><th class="num">€/month</th><th>Status</th>
+    </tr></thead>
+    <tbody>
+    {{range .Groups}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td class="muted">{{if .TargetDate}}{{.TargetDate}}{{else}}—{{end}}</td>
+        <td class="num">{{if .Plan.MonthsLeft}}{{.Plan.MonthsLeft}}{{else}}—{{end}}</td>
+        <td class="num">{{eur .Plan.Target}}</td>
+        <td class="num">{{eur .Plan.Spent}}</td>
+        <td class="num">{{eur .Plan.Financed}}</td>
+        <td class="num">{{eur .Plan.ToSave}}</td>
+        <td class="num">{{if .Done}}—{{else if .Plan.Overdue}}{{eur .Plan.ToSave}}{{else}}{{eur .Plan.MonthlyToSave}}{{end}}</td>
+        <td>{{if .Done}}<span class="tag">funded</span>{{else if .Plan.Overdue}}<span class="neg">overdue</span>{{else}}<span class="pos">on track</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+    <tfoot><tr>
+      <td colspan="3">Total{{if .Project.DepositPaid}} <span class="muted small">(Spent incl. {{eur .Project.DepositPaid}} deposit)</span>{{end}}</td>
+      <td class="num">{{eur .Plan.Target}}</td>
+      <td class="num">{{eur .Plan.Spent}}</td>
+      <td class="num">{{eur .Plan.Financed}}</td>
+      <td class="num">{{eur .Plan.ToSave}}</td>
+      <td class="num">{{eur .Plan.MonthlyToSave}}</td>
+      <td></td>
+    </tr></tfoot>
+  </table>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Month-by-month saving</h2></div>
+  {{if .Schedule}}
+  <table class="table sched">
+    <thead><tr>
+      <th>Month</th>
+      {{range .ScheduleGroups}}<th class="num">{{.}}</th>{{end}}
+      <th class="num">Total</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {{range .Schedule}}
+      <tr>
+        <td>{{.Label}}</td>
+        {{range .ByGroup}}<td class="num">{{if .}}{{eur .}}{{else}}<span class="muted">—</span>{{end}}</td>{{end}}
+        <td class="num">{{eur .Total}}</td>
+        <td class="barcell"><div class="bar-track"><div class="bar-fill" style="width: {{pct .Total $.Peak}}%"></div></div></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="muted small">Each phase contributes its monthly amount until its target date; the total drops as nearer phases are funded.</p>
+  {{else}}
+  <p class="empty">Nothing on a monthly schedule{{if .DueNow}} — {{eur .DueNow}} is overdue and due now{{else}} — add phases with target dates, or everything is already funded{{end}}.</p>
+  {{end}}
+</section>
+{{end}}{{/* end save-vs-loan branch */}}
+{{end}}

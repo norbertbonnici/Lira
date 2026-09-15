@@ -1,0 +1,76 @@
+{{define "title"}}Net worth forecast · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Net worth forecast</h1>
+  <span><a class="addlink" href="/burndown">Cash burn-down →</a> &nbsp; <a class="addlink" href="/history">History</a></span>
+</div>
+
+{{if .NoSavings}}
+<section class="panel">
+  <p class="muted small">Set a <strong>planned monthly saving</strong> in <a href="/settings">Settings</a> to project how your net worth grows from here. The forecast below uses your current data only.</p>
+</section>
+{{end}}
+
+<section class="hero">
+  <span class="eyebrow">Today's net worth</span>
+  <div class="nav-figure">{{eur .StartNAV}}</div>
+  <div class="hero-split">
+    <div><span class="k">Planned saving / mo</span><span class="v">{{eur .Planned}}</span></div>
+    <div><span class="k">Actual saving / mo <span class="small muted">(from ledger)</span></span><span class="v {{signClass .Actual}}">{{eur .Actual}}</span></div>
+    {{if .HasTarget}}<div><span class="k">Target</span><span class="v">{{eur .Target}}</span></div>{{end}}
+  </div>
+  {{if .HasTarget}}
+  <p class="muted small">
+    At your planned rate you reach {{eur .Target}}
+    {{if eq .PlannedETAMonths 0}}<strong>already</strong>.{{else if lt .PlannedETAMonths 0}}<strong>not within {{.Months}} months</strong>.{{else}}around <strong>{{.PlannedETA}}</strong> ({{.PlannedETAMonths}} months).{{end}}
+    At your recent actual rate:
+    {{if eq .ActualETAMonths 0}}already there.{{else if lt .ActualETAMonths 0}}not within {{.Months}} months.{{else}}<strong>{{.ActualETA}}</strong> ({{.ActualETAMonths}} months).{{end}}
+  </p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Projection</h2></div>
+  {{forecastChart .Chart}}
+  <div class="legend">
+    <span><span class="sw" style="background:#14463f"></span>Planned ({{eur .Planned}}/mo)</span>
+    <span><span class="sw" style="background:#a9947c"></span>Actual ({{eur .Actual}}/mo)</span>
+    {{if .HasTarget}}<span><span class="sw" style="background:#b06a3b"></span>Target {{eur .Target}}</span>{{end}}
+  </div>
+  <form method="get" action="/forecast" class="kpis" style="align-items:flex-end; margin-top:14px">
+    {{if .HasTarget}}
+    <label style="margin:0">Target (EUR)
+      <input name="target" type="text" inputmode="decimal" value="{{printf "%.0f" .Target}}">
+    </label>
+    {{else}}
+    <label style="margin:0">Target (EUR)
+      <input name="target" type="text" inputmode="decimal" placeholder="e.g. 500000">
+    </label>
+    {{end}}
+    <label style="margin:0">Annual return %
+      <input name="return" type="text" inputmode="decimal" value="{{printf "%g" .Return}}">
+    </label>
+    <label style="margin:0">Horizon (months)
+      <input name="months" type="text" inputmode="numeric" value="{{.Months}}">
+    </label>
+    <button type="submit" class="primary">Update</button>
+  </form>
+  <p class="muted small">Planned uses the saving set in <a href="/settings">Settings</a>; actual is your average net (income − spending, transfers excluded) over recent months. Optional annual return compounds the whole balance monthly. The default target is your FI number (25× yearly operating costs).</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Year by year</h2></div>
+  <table class="table">
+    <thead><tr><th>When</th><th class="num">Planned NAV</th><th class="num">Actual-rate NAV</th></tr></thead>
+    <tbody>
+    {{range .Years}}
+      <tr>
+        <td>{{.Label}}{{if eq .Year 0}} <span class="muted small">(now)</span>{{end}}</td>
+        <td class="num">{{eur .Planned}}{{if .PlannedHit}} <span class="tag">target</span>{{end}}</td>
+        <td class="num">{{eur .Actual}}{{if .ActualHit}} <span class="tag">target</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

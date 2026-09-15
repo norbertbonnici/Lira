@@ -1,0 +1,30 @@
+{{define "title"}}Accounts · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Accounts</h1>
+  <a class="primary button" href="/accounts/new">+ New account</a>
+</div>
+{{if .Accounts}}
+<table class="table">
+  <thead><tr><th>Name</th><th>Type</th><th>Currency</th><th class="num">Balance</th><th></th></tr></thead>
+  <tbody>
+  {{range .Accounts}}
+    <tr>
+      <td>{{.Name}}{{if .Spending}} <span class="tag">spending</span>{{end}}</td>
+      <td>{{.Type}}</td>
+      <td>{{.Currency}}</td>
+      <td class="num {{signClass .Balance}}">{{eur .Balance}}</td>
+      <td class="rowact"><a href="/accounts/{{.ID}}/edit">Edit</a></td>
+    </tr>
+  {{end}}
+  </tbody>
+  <tfoot>
+    <tr><td colspan="3">Total</td><td class="num">{{eur .Total}}</td><td></td></tr>
+    {{if ne .NetWorthTotal .Total}}<tr><td colspan="3" class="muted">Counted in net worth</td><td class="num muted">{{eur .NetWorthTotal}}</td><td></td></tr>{{end}}
+  </tfoot>
+</table>
+{{if ne .NetWorthTotal .Total}}<p class="muted small">Accounts tagged <span class="tag">spending</span> fund operating costs and are excluded from net worth and project funding.</p>{{end}}
+{{else}}
+<p class="empty">No accounts yet. <a href="/accounts/new">Add your first account.</a></p>
+{{end}}
+{{end}}

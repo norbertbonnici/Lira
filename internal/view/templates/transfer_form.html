@@ -1,0 +1,41 @@
+{{define "title"}}Transfer · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">Transfer between accounts</h1>
+  {{if .Accounts}}
+  <form method="post" action="/transfer">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <div class="row2">
+      <label>From
+        <select name="from_id" required>
+          {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+      </label>
+      <label>To
+        <select name="to_id" required>
+          {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <div class="row2">
+      <label>Amount
+        <input name="amount" type="text" inputmode="decimal" placeholder="0.00" required>
+      </label>
+      <label>Date
+        <input type="date" name="date" value="{{today}}" required>
+      </label>
+    </div>
+    <label>Notes
+      <input name="notes" placeholder="optional">
+    </label>
+    <div class="actions">
+      <button type="submit" class="primary">Record transfer</button>
+      <a class="cancel" href="/transactions">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Creates two balanced entries (out of “From”, into “To”). Net worth is unchanged, and transfers are excluded from spending/income analytics.</p>
+  {{else}}
+  <p class="empty">You need at least two accounts first. <a href="/accounts/new">Add an account.</a></p>
+  {{end}}
+</div>
+{{end}}

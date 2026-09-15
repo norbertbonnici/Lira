@@ -1,0 +1,48 @@
+{{define "title"}}Categories · Lira{{end}}
+{{define "content"}}
+<div class="page-head">
+  <h1 class="display">Categories</h1>
+  <a class="addlink" href="/transactions">← Transactions</a>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><h2>Add category</h2></div>
+  <form method="post" action="/categories" class="addrow">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input name="name" placeholder="e.g. Childcare, Bonus" required>
+    <select name="kind">
+      <option value="expense">expense</option>
+      <option value="income">income</option>
+    </select>
+    <button type="submit" class="primary">Add</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>All categories</h2></div>
+  {{if .Rows}}
+  <table class="table">
+    <thead><tr><th>Name</th><th>Kind</th><th class="num">Used by</th><th></th></tr></thead>
+    <tbody>
+    {{range .Rows}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td class="muted">{{.Kind}}</td>
+        <td class="num muted">{{.Count}}</td>
+        <td class="rowact">
+          <a href="/categories/{{.ID}}/edit">Edit</a>
+          <form method="post" action="/categories/{{.ID}}/delete">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit" class="linklike danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="muted small">Deleting a category leaves its transactions uncategorized — it doesn't remove them.</p>
+  {{else}}
+  <p class="empty">No categories yet.</p>
+  {{end}}
+</section>
+{{end}}

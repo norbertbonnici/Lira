@@ -1,0 +1,45 @@
+{{define "title"}}{{.Heading}} · Lira{{end}}
+{{define "content"}}
+<div class="formcard">
+  <h1 class="display">{{.Heading}}</h1>
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <div class="row2">
+      <label>Symbol
+        <input name="symbol" value="{{.Holding.Symbol}}" placeholder="e.g. AAPL, VWCE" required autofocus>
+      </label>
+      {{$k := .Holding.Kind}}
+      <label>Type
+        <select name="kind">
+          <option value="stock" {{if eq $k "stock"}}selected{{end}}>Stock</option>
+          <option value="etf" {{if eq $k "etf"}}selected{{end}}>ETF</option>
+        </select>
+      </label>
+    </div>
+    <label>Name
+      <input name="name" value="{{.Holding.Name}}" placeholder="optional">
+    </label>
+    <div class="row2">
+      <label>Quantity (shares)
+        <input name="quantity" type="text" inputmode="decimal" value="{{printf "%g" .Holding.Quantity}}">
+      </label>
+      <label>Current price
+        <input name="price" type="text" inputmode="decimal" value="{{printf "%g" .Holding.Price}}">
+      </label>
+    </div>
+    <div class="row2">
+      <label>Currency
+        <input name="currency" value="{{with .Holding.Currency}}{{.}}{{else}}EUR{{end}}" maxlength="3">
+      </label>
+      <label>Cost basis — total paid (optional)
+        <input name="cost_basis" type="text" inputmode="decimal" value="{{if .Holding.CostBasis.Valid}}{{printf "%g" .Holding.CostBasis.Float64}}{{end}}">
+      </label>
+    </div>
+    <div class="actions">
+      <button type="submit" class="primary">Save</button>
+      <a class="cancel" href="/holdings">Cancel</a>
+    </div>
+  </form>
+  <p class="muted small">Value is quantity × current price. If auto-pricing is enabled, use the data provider's symbol (e.g. <code>AAPL</code>) — the price refreshes automatically; unknown symbols keep whatever you enter here. Currency drives EUR conversion for net worth.</p>
+</div>
+{{end}}

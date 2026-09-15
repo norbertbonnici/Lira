@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{block "title" .}}Lira{{end}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{{if .User}}
+<header class="topbar">
+  <div class="wrap bar">
+    <a class="brand" href="/">Li<span>ra</span></a>
+    <nav class="mainnav">
+      <a href="/">Dashboard</a>
+      <a href="/accounts">Accounts</a>
+      <a href="/transactions">Transactions</a>
+      <a href="/holdings">Investments</a>
+      <a href="/projects">Projects</a>
+      <a href="/costs">Costs</a>
+      <a href="/pocket">Pocket</a>
+      <a href="/reports">Reports</a>
+      {{if eq .User.Role "admin"}}<a href="/settings">Settings</a>{{end}}
+    </nav>
+    <form class="signout" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit" class="linklike">Sign out</button>
+    </form>
+  </div>
+</header>
+{{end}}
+<main class="wrap">
+  {{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
+  {{if .Flash}}<div class="alert flash">{{.Flash}}</div>{{end}}
+  {{block "content" .}}{{end}}
+</main>
+</body>
+</html>
