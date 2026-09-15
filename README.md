@@ -376,3 +376,7 @@ deploy/     lira.service       systemd unit
 - **Controller** (`internal/controller`): request handling, authentication,
   sessions, CSRF; orchestrates model + view. Handlers are thin.
 
+## License
+
+Lira is licensed under the **GNU Affero General Public License v3.0 only**
+(`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full terms.
