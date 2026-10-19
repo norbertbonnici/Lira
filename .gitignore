@@ -23,3 +23,29 @@ go.work.sum
 
 # env file
 .env
+.env.*
+*.env
+!*.example.env
+!.env.example
+
+# Local financial data, SQLite sidecars, and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.sqlitedb
+*.bak
+*.backup
+/backups/
+/exports/
+
+# Application build outputs
+/lira
+/lira-linux-*
+/release/
+
+# Machine-local settings and macOS metadata
+.claude/settings.local.json
+.DS_Store
