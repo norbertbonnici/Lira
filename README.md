@@ -111,7 +111,7 @@ The project page keeps a standalone **loan calculator** too, so you can model
 
 ## Build
 
-Requires Go 1.24+ (raised by `golang.org/x/crypto` v0.45; the app's net/http routing itself needs ≥1.22).
+Requires Go 1.25+ (raised by `golang.org/x/crypto` v0.52 — follow `go.mod`; the app's net/http routing itself needs ≥1.22).
 
 ```bash
 make tidy      # resolves dependencies, writes go.sum  (run once, needs internet)

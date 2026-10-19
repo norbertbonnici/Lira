@@ -6,17 +6,25 @@ Guidance for working on **Lira** in this repo. Read this before making changes.
 Lira is a small, self-hosted personal-finance web app (net worth, accounts,
 transactions, investments) for a two-person household, designed to run on a
 ZimaBoard. Go, server-rendered HTML, local SQLite, single static binary.
+Licensed **AGPL-3.0-only**. `AGENTS.md` is the short generic-agent summary;
+this file is the canonical, detailed guidance — keep both in sync when
+commands or conventions change.
 
 ## Commands
 - `make tidy` — `go mod tidy`. **Run first** (deps are not vendored; needs network).
 - `make run` — `go run .` for local dev.
 - `make build` — static binary `./lira` (`CGO_ENABLED=0`).
 - `make linux` — cross-compile `./lira-linux-amd64` for the ZimaBoard (x86-64).
-- `go test ./...` — tests (controller: TOTP RFC vectors; view: template parse/exec).
+- `make deploy LIRA_HOST=user@your-server` — `make linux` + roll out via
+  `deploy/deploy.sh` (stop → swap → start, backup + auto-rollback on the host).
+- `go test ./...` — all tests (model: store + finance math; controller: TOTP RFC
+  vectors, plan/ledger helpers; view: every template parses + executes).
+- `go test ./internal/controller -run TestStillToDraw` — run one test by name.
 - `go vet ./...` — vet.
 
-Go **1.24+** required (`golang.org/x/crypto` v0.45 sets the floor; the net/http
-ServeMux method+pattern routing this app relies on needs ≥1.22).
+Go **1.25+** required — follow `go.mod`'s `go` directive, which
+`golang.org/x/crypto` bumps keep raising (currently v0.52 → go 1.25); the
+net/http ServeMux method+pattern routing this app relies on needs ≥1.22.
 
 Local HTTP smoke test: `LIRA_SECURE_COOKIES=false ./lira` → http://localhost:8080.
 The flag must be off for plain HTTP, otherwise the session cookie isn't sent.
@@ -420,7 +428,7 @@ README.
    `PriceProvider`/`FXProvider` seam; background refresh in `main`.
 
 Possible next ideas (not committed): per-holding manual-price opt-out, provider
-selection via config, multi-base currency, CSV import/export.
+selection via config, multi-base currency.
 
 ## Adding things — quick recipes
 - **New page:** add `internal/view/templates/<name>.html` (with the two define
