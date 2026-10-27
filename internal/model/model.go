@@ -1544,9 +1544,14 @@ func (s *Store) Backup(path string) error {
 
 // CreateTransfer records a money move between two accounts as two balanced legs
 // (expense from `from`, income to `to`), atomically, sharing a transfer_id so
-// they're recognizable (and excluded from spend/income analytics). NAV is
-// unaffected. amount must be positive.
-func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, notes string) error {
+// they're recognizable (and excluded from spend/income analytics). Within one
+// currency NAV is unaffected. Both amounts must be positive.
+//
+// sent leaves `from` (in its currency) and received lands in `to` (in its);
+// they differ only between accounts in different currencies, where the gap is
+// the exchange rate (and any fee) — a same-currency transfer passes the same
+// amount twice.
+func (s *Store) CreateTransfer(fromID, toID int64, date string, sent, received float64, notes string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1555,7 +1560,7 @@ func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, 
 	now := nowRFC()
 	res, err := tx.Exec(
 		`INSERT INTO transactions(account_id, date, amount, payee, notes, created_at) VALUES(?,?,?,?,?,?)`,
-		fromID, date, -amount, "Transfer", notes, now)
+		fromID, date, -sent, "Transfer", notes, now)
 	if err != nil {
 		return err
 	}
@@ -1565,7 +1570,7 @@ func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, 
 	}
 	res, err = tx.Exec(
 		`INSERT INTO transactions(account_id, date, amount, payee, notes, created_at) VALUES(?,?,?,?,?,?)`,
-		toID, date, amount, "Transfer", notes, now)
+		toID, date, received, "Transfer", notes, now)
 	if err != nil {
 		return err
 	}

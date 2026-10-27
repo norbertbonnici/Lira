@@ -146,7 +146,7 @@ func TestSpendingAnalytics(t *testing.T) {
 	_ = s.CreateTransaction(acct, "2026-05-12", -100, catID("Groceries"), "Lidl", "")
 	_ = s.CreateTransaction(acct, "2026-05-15", -50, catID("Groceries"), "Aldi", "")
 	_ = s.CreateTransaction(acct, "2026-05-20", -40, catID("Dining"), "Pizza", "")
-	_ = s.CreateTransfer(acct, sav, "2026-05-25", 200, "savings move") // must be excluded
+	_ = s.CreateTransfer(acct, sav, "2026-05-25", 200, 200, "savings move") // must be excluded
 
 	m, _ := s.MonthlyTotals()
 	if may := m["2026-05"]; may.Income != 3000 || may.Expense != 190 {
@@ -172,7 +172,7 @@ func TestCreateTransfer(t *testing.T) {
 			bID = a.ID
 		}
 	}
-	if err := s.CreateTransfer(aID, bID, "2026-06-01", 250, "rent pot"); err != nil {
+	if err := s.CreateTransfer(aID, bID, "2026-06-01", 250, 250, "rent pot"); err != nil {
 		t.Fatal(err)
 	}
 	accts, _ = s.ListAccounts()
@@ -204,7 +204,7 @@ func TestDeleteTransferLegRemovesBoth(t *testing.T) {
 	_ = s.CreateAccount("B", "savings", "EUR", 0, false)
 	accts, _ := s.ListAccounts()
 	aID, bID := accts[0].ID, accts[1].ID
-	if err := s.CreateTransfer(aID, bID, "2026-06-01", 300, ""); err != nil {
+	if err := s.CreateTransfer(aID, bID, "2026-06-01", 300, 300, ""); err != nil {
 		t.Fatal(err)
 	}
 	_ = s.CreateTransaction(aID, "2026-06-02", -20, nil, "Coffee", "")
