@@ -121,12 +121,21 @@ func (c *Controller) projectGroups(p *model.Project, now time.Time) ([]phaseGrou
 }
 
 // stillToDraw is how much of a plan's Financed figure has not actually left the
-// accounts yet. A PAID loan deposit already reduced NAV (it's a real
-// transaction), so projections must not subtract it a second time. The credit
-// applies regardless of the CURRENT finance method: switching a project back to
-// "save" after paying the deposit must not make the paid money count twice.
+// accounts yet. Payments are real transactions that already reduced NAV, so
+// projections must not subtract them a second time:
+//   - loan-financed: Financed is the deposit, so credit the deposit paid (item
+//     payments are funded by the loan, not the deposit);
+//   - save-financed: payments draw the financed share first (the money that
+//     exists today — see model.ProjectPlan.ToSave), so credit everything paid:
+//     plan.Spent, which for projectGroups' aggregate includes item payments AND
+//     any deposit paid before a switch back from "loan" (so that money can't
+//     count twice either).
 func stillToDraw(p *model.Project, plan model.ProjectPlan) float64 {
-	f := plan.Financed - p.DepositPaid
+	paid := p.DepositPaid
+	if !loanFinanced(p) {
+		paid = plan.Spent
+	}
+	f := plan.Financed - paid
 	if f < 0 {
 		f = 0
 	}

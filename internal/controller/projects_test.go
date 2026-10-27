@@ -48,10 +48,22 @@ func TestStillToDraw(t *testing.T) {
 	if got := stillToDraw(partial, plan); got != 500 {
 		t.Errorf("partial deposit: stillToDraw = %v want 500", got)
 	}
-	// Switching the method back to "save" must not double-count the paid cash.
+	// Switching the method back to "save" must not double-count the paid cash
+	// (projectGroups' aggregate Spent includes the paid deposit).
 	switched := &model.Project{FinanceMethod: "save", DepositPaid: 1500}
-	if got := stillToDraw(switched, model.ProjectPlan{Financed: 2000}); got != 500 {
+	if got := stillToDraw(switched, model.ProjectPlan{Financed: 2000, Spent: 1500}); got != 500 {
 		t.Errorf("method switched after paying: stillToDraw = %v want 500", got)
+	}
+	// Save project: item payments already left NAV, so they reduce the draw.
+	// 100% financed €10k with €6k paid → €4k still to draw, not €10k.
+	saving := &model.Project{FinanceMethod: "save"}
+	if got := stillToDraw(saving, model.ProjectPlan{Financed: 10000, Spent: 6000}); got != 4000 {
+		t.Errorf("save project with 6k paid: stillToDraw = %v want 4000", got)
+	}
+	// Loan project: item payments are the loan's money, only the deposit counts.
+	loanItems := &model.Project{FinanceMethod: "loan", LoanTermMonths: 48, DepositPaid: 500}
+	if got := stillToDraw(loanItems, model.ProjectPlan{Financed: 1500, Spent: 9000}); got != 1000 {
+		t.Errorf("loan project with item payments: stillToDraw = %v want 1000", got)
 	}
 	// Overpaid clamps at zero rather than going negative.
 	over := &model.Project{FinanceMethod: "loan", LoanTermMonths: 48, DepositPaid: 9999}

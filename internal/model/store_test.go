@@ -796,6 +796,26 @@ func TestComputePlan(t *testing.T) {
 	if nd.Overdue || nd.MonthlyToSave != 750 {
 		t.Errorf("no-date plan = %+v", nd)
 	}
+
+	// Payments draw the financed share first: €10k, 40% financed, €3k paid →
+	// still €6k to save; €8k paid → only €2k left to save.
+	p3 := ComputePlan(10000, 3000, 40, 0, "2026-12-01", now)
+	if !approx(p3.ToSave, 6000) || !approx(p3.MonthlyToSave, 1000) {
+		t.Errorf("3k paid: toSave %v monthly %v want 6000 / 1000", p3.ToSave, p3.MonthlyToSave)
+	}
+	p8 := ComputePlan(10000, 8000, 40, 0, "2026-12-01", now)
+	if !approx(p8.ToSave, 2000) || !approx(p8.MonthlyToSave, 2000.0/6) {
+		t.Errorf("8k paid: toSave %v monthly %v want 2000 / 333.33", p8.ToSave, p8.MonthlyToSave)
+	}
+	// An overdue phase that's 90% paid asks for the unpaid 10%, not its whole budget.
+	odp := ComputePlan(10000, 9000, 0, 0, "2026-01-01", now)
+	if !odp.Overdue || odp.MonthlyToSave != 1000 || odp.ToSave != 1000 {
+		t.Errorf("overdue, 9k of 10k paid = %+v want 1000 due now", odp)
+	}
+	// Overpaid never goes negative.
+	if op := ComputePlan(1000, 1200, 0, 0, "2026-12-01", now); op.ToSave != 0 || op.MonthlyToSave != 0 {
+		t.Errorf("overpaid plan = %+v want nothing to save", op)
+	}
 }
 
 func TestProjectAndPurchase(t *testing.T) {

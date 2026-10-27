@@ -236,11 +236,15 @@ type Phase struct {
 
 // ProjectPlan is the derived savings guidance for a project.
 type ProjectPlan struct {
-	Target        float64 // ItemsTotal × (1 + buffer/100)
-	Spent         float64
-	Remaining     float64 // Target − Spent
-	Financed      float64 // Target × finance%/100 — drawn from existing savings
-	ToSave        float64 // Target − Financed
+	Target    float64 // ItemsTotal × (1 + buffer/100)
+	Spent     float64
+	Remaining float64 // Target − Spent
+	Financed  float64 // Target × finance%/100 — drawn from existing savings
+	// ToSave is what still has to be saved: the to-save share (Target − Financed)
+	// less any payments beyond the financed share. Payments draw the financed
+	// share first — that money exists today — so it's min(Target − Financed,
+	// max(Remaining, 0)), and MonthlyToSave spreads it over the months left.
+	ToSave        float64
 	MonthlyToSave float64
 	MonthsLeft    int
 	Overdue       bool
@@ -341,6 +345,9 @@ func ComputePlan(itemsTotal, spent, financePct, bufferPct float64, targetDate st
 	target := ProjectTarget(itemsTotal, bufferPct)
 	financed := target * financePct / 100
 	toSave := target - financed
+	if rem := target - spent; rem < toSave {
+		toSave = rem // already-paid money has covered part of the to-save share
+	}
 	if toSave < 0 {
 		toSave = 0
 	}
