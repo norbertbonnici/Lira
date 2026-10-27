@@ -1,37 +1,14 @@
 package controller
 
 import (
-	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
-	"lira/internal/config"
 	"lira/internal/model"
-	"lira/internal/view"
-
-	_ "modernc.org/sqlite"
 )
-
-// newTestController wires a controller to a fresh migrated store and the real
-// templates, for handler-level tests.
-func newTestController(t *testing.T) (*Controller, *model.Store) {
-	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/t.db?_pragma=foreign_keys(ON)")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	store := model.New(db)
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return New(store, view.New(), config.Config{MaxUsers: 2, SessionTTL: time.Hour}), store
-}
 
 // postForm builds a CSRF-valid form POST.
 func postForm(path string, vals url.Values) *http.Request {
@@ -46,7 +23,7 @@ func postForm(path string, vals url.Values) *http.Request {
 // otherwise re-logging in after every few wrong codes gives unlimited TOTP
 // guesses.
 func TestPasswordLoginDoesNotResetTwoFactorLockout(t *testing.T) {
-	c, store := newTestController(t)
+	c, store := testController(t)
 	hash, err := hashPassword("correct horse")
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +76,7 @@ func TestPasswordLoginDoesNotResetTwoFactorLockout(t *testing.T) {
 // Without 2FA the password is the only factor, so a correct one still clears
 // earlier failures.
 func TestPasswordLoginResetsCounterWithoutTwoFactor(t *testing.T) {
-	c, store := newTestController(t)
+	c, store := testController(t)
 	hash, _ := hashPassword("pw")
 	uid, _ := store.CreateUser("bob", hash, "admin")
 	for i := 0; i < maxFailed-1; i++ {

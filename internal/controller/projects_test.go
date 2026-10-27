@@ -108,7 +108,7 @@ func TestLoanRepaying(t *testing.T) {
 // still running (completing drops the loan payment from the budget); a save
 // project still auto-completes.
 func TestItemPurchaseKeepsRunningLoanActive(t *testing.T) {
-	c, store := newTestController(t)
+	c, store := testController(t)
 	_ = store.CreateAccount("Current", "checking", "EUR", 50000, false)
 	accts, _ := store.ListAccounts()
 	acct := accts[0].ID

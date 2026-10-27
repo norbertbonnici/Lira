@@ -6,11 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"lira/internal/config"
 	"lira/internal/model"
+	"lira/internal/view"
 
 	_ "modernc.org/sqlite"
 )
 
+// testController wires a controller to a fresh migrated store and the real
+// templates, for handler-level tests.
 func testController(t *testing.T) (*Controller, *model.Store) {
 	t.Helper()
 	dir := t.TempDir()
@@ -24,7 +28,7 @@ func testController(t *testing.T) (*Controller, *model.Store) {
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return &Controller{store: store}, store
+	return New(store, view.New(), config.Config{MaxUsers: 2, SessionTTL: time.Hour}), store
 }
 
 func TestAddLoanStream(t *testing.T) {

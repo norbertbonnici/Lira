@@ -85,7 +85,7 @@ func TestParseCSVAmount(t *testing.T) {
 // ambiguous rows as unparseable, never book them 100x too large; a lone "-" in
 // the unused debit/credit column still counts as blank.
 func TestImportCommitRejectsAmbiguousAmounts(t *testing.T) {
-	c, store := newTestController(t)
+	c, store := testController(t)
 	_ = store.CreateAccount("Current", "checking", "EUR", 0, false)
 	accts, _ := store.ListAccounts()
 	acct := strconv.FormatInt(accts[0].ID, 10)
