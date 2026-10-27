@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"math"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -313,6 +315,49 @@ func TestEUR(t *testing.T) {
 	for in, want := range map[float64]string{-0.001: "zero", 0.004: "zero", 0.005: "pos", -0.01: "neg", math.NaN(): "zero"} {
 		if got := signClass(in); got != want {
 			t.Errorf("signClass(%v)=%q want %q", in, got, want)
+		}
+	}
+}
+
+// svgYs returns every y coordinate in an SVG's points="x,y ..." lists and
+// cy="…" attributes.
+func svgYs(svg string) []float64 {
+	var ys []float64
+	for _, m := range regexp.MustCompile(`points="([^"]*)"`).FindAllStringSubmatch(svg, -1) {
+		for _, pair := range strings.Fields(m[1]) {
+			if _, yStr, ok := strings.Cut(pair, ","); ok {
+				y, _ := strconv.ParseFloat(yStr, 64)
+				ys = append(ys, y)
+			}
+		}
+	}
+	for _, m := range regexp.MustCompile(`cy="([-0-9.]+)"`).FindAllStringSubmatch(svg, -1) {
+		y, _ := strconv.ParseFloat(m[1], 64)
+		ys = append(ys, y)
+	}
+	return ys
+}
+
+// Negative values stay inside the 240-high canvas: a negative cash balance
+// under positive investments, and forecast lines that dip below zero.
+func TestChartsKeepNegativesOnCanvas(t *testing.T) {
+	charts := map[string]string{
+		"navChart": string(navChart(ChartSeries{Labels: []string{"a", "b", "c"},
+			Cash: []float64{-50000, -48000, -46000}, Inv: []float64{200000, 205000, 210000},
+			Total: []float64{150000, 157000, 164000}})),
+		"forecastChart": string(forecastChart(ForecastSeries{Labels: []string{"a", "b", "c"},
+			Planned: []float64{1000, 500, 0}, Actual: []float64{1000, -2000, -5000}, Target: 3000})),
+	}
+	for name, svg := range charts {
+		ys := svgYs(svg)
+		if len(ys) == 0 {
+			t.Fatalf("%s: no coordinates found", name)
+		}
+		for _, y := range ys {
+			if y < 0 || y > 240 {
+				t.Errorf("%s: y=%.1f outside the 0–240 canvas", name, y)
+				break
+			}
 		}
 	}
 }
