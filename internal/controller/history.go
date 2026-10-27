@@ -85,9 +85,10 @@ func (c *Controller) RefreshNow(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := c.refresh(ctx); err != nil {
 			log.Printf("manual refresh: %v", err)
-		} else {
-			_ = c.store.MarkAutoFetched() // count as today's fetch so auto won't repeat
+			http.Redirect(w, r, "/holdings?refresh=failed", http.StatusSeeOther)
+			return
 		}
+		_ = c.store.MarkAutoFetched() // count as today's fetch so auto won't repeat
 	}
 	http.Redirect(w, r, "/holdings", http.StatusSeeOther)
 }

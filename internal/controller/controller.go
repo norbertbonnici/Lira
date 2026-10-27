@@ -513,15 +513,16 @@ func (c *Controller) Holdings(w http.ResponseWriter, r *http.Request) {
 		updated = updated[:10]
 	}
 	c.render(w, r, "holdings.html", map[string]any{
-		"Rows":         rows,
-		"Currencies":   currencies,
-		"ShowFX":       anyFX,
-		"Total":        total,
-		"TotalGain":    totalGain,
-		"TotalGainPct": totalGainPct,
-		"HasGains":     totalCost > 0,
-		"Updated":      updated,
-		"Refreshable":  c.refresh != nil,
+		"RefreshFailed": r.URL.Query().Get("refresh") == "failed",
+		"Rows":          rows,
+		"Currencies":    currencies,
+		"ShowFX":        anyFX,
+		"Total":         total,
+		"TotalGain":     totalGain,
+		"TotalGainPct":  totalGainPct,
+		"HasGains":      totalCost > 0,
+		"Updated":       updated,
+		"Refreshable":   c.refresh != nil,
 	})
 }
 

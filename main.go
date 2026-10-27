@@ -65,11 +65,7 @@ func main() {
 	if cfg.MarketAPIKey != "" {
 		td := market.TwelveData{APIKey: cfg.MarketAPIKey}
 		refresh = func(ctx context.Context) error {
-			if _, err := market.UpdateFX(ctx, td, store); err != nil {
-				return err
-			}
-			_, err := market.UpdatePrices(ctx, td, store)
-			return err
+			return market.Refresh(ctx, td, store, td, store)
 		}
 		c.SetRefresh(refresh)
 		log.Printf("market data: Twelve Data enabled (interval %s)", cfg.FetchInterval)

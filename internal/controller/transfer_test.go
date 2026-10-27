@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -56,5 +58,24 @@ func TestTransferBetweenCurrencies(t *testing.T) {
 	transfer("Euro", "Euro2", "50", "999")
 	if b := balances(); b["Euro"] != 850 || b["Euro2"] != 50 {
 		t.Errorf("after EUR→EUR: %v want Euro 850, Euro2 50", b)
+	}
+}
+
+// A failed manual refresh tells the user instead of silently redirecting.
+func TestRefreshNowReportsFailure(t *testing.T) {
+	c, _ := testController(t)
+	c.SetRefresh(func(context.Context) error { return errors.New("provider down") })
+	w := httptest.NewRecorder()
+	c.RefreshNow(w, postForm("/refresh", url.Values{}))
+	loc := w.Header().Get("Location")
+	if loc != "/holdings?refresh=failed" {
+		t.Fatalf("redirect = %q want /holdings?refresh=failed", loc)
+	}
+	r := withUser(httptest.NewRequest(http.MethodGet, loc, nil),
+		&model.Session{MFAPassed: true}, &model.User{ID: 1, Username: "a", Role: "admin"})
+	w = httptest.NewRecorder()
+	c.Holdings(w, r)
+	if !strings.Contains(w.Body.String(), "didn't fully succeed") {
+		t.Error("holdings page doesn't mention the failed refresh")
 	}
 }
