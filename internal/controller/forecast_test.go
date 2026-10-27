@@ -2,7 +2,10 @@ package controller
 
 import (
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,5 +179,52 @@ func TestBuildCashLedger(t *testing.T) {
 	pts = model.BuildBurnDown(5000, 300, outs, nil, 12)
 	if rows[1].Balance != pts[12].Balance {
 		t.Errorf("no-spend end balance %v != chart %v", rows[1].Balance, pts[12].Balance)
+	}
+}
+
+func TestDepositPaidPreLira(t *testing.T) {
+	now := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		when string
+		paid float64
+		want bool
+	}{
+		{"2026-09-15", 0, true},    // due last month, nothing recorded → paid before Lira
+		{"2026-09-15", 200, false}, // increments recorded → Lira tracks it, keep the rest
+		{"2026-10-28", 0, false},   // due later this month → still upcoming
+		{"2026-10-01", 0, false},   // earlier this month counts as this month
+		{"2026-11-01", 0, false},   // future
+		{"not a date", 0, true},    // nowhere to place it
+	}
+	for _, tc := range cases {
+		if got := depositPaidPreLira(now, tc.when, tc.paid); got != tc.want {
+			t.Errorf("depositPaidPreLira(%q, %v) = %v want %v", tc.when, tc.paid, got, tc.want)
+		}
+	}
+}
+
+// End to end: a loan starting later this month with its deposit unpaid shows
+// the deposit as a spend in the burn-down ledger.
+func TestBurnDownShowsDepositDueThisMonth(t *testing.T) {
+	c, store := testController(t)
+	_ = store.CreateAccount("Bank", "savings", "EUR", 20000, false)
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), 28, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	pid, err := store.CreateProjectInput(model.ProjectInput{Name: "Car", Status: "saving",
+		FinanceMethod: "loan", LoanDeposit: 5000, LoanAPR: 5, LoanTermMonths: 48, LoanStartDate: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.CreateProjectItem(pid, nil, "Car", 25000, true)
+
+	r := withUser(httptest.NewRequest(http.MethodGet, "/burndown", nil),
+		&model.Session{MFAPassed: true}, &model.User{ID: 1, Username: "a", Role: "admin"})
+	w := httptest.NewRecorder()
+	c.BurnDown(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Car · loan deposit") {
+		t.Error("burn-down omits the unpaid deposit of a loan starting this month")
 	}
 }

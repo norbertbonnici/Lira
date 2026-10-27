@@ -126,14 +126,20 @@ func addLoanStream(outs map[int]float64, startMonth, monthsLeft, horizon int, mo
 	}
 }
 
-// futureMonth reports whether dateStr (YYYY-MM-DD) falls in a month strictly
-// after now's month. False for empty/unparseable dates.
-func futureMonth(now time.Time, dateStr string) bool {
-	d, err := time.Parse("2006-01-02", dateStr)
+// depositPaidPreLira reports whether an unpaid-looking loan deposit should be
+// left out of the burn-down: its due month (`when`, YYYY-MM-DD) is already
+// BEFORE the current month and no payments are recorded, which implies it was
+// handed over before Lira tracked it (no phantom lump). A deposit due THIS month
+// is still upcoming, and recorded increments prove Lira is tracking it — both
+// keep the remainder as a lump (monthsFromNow clamps past dates to next month).
+// An unparseable date is skipped too, as there is no month to put it in.
+func depositPaidPreLira(now time.Time, when string, depositPaid float64) bool {
+	d, err := time.Parse("2006-01-02", when)
 	if err != nil {
-		return false
+		return true
 	}
-	return (d.Year()*12 + int(d.Month())) > (now.Year()*12 + int(now.Month()))
+	past := (d.Year()*12 + int(d.Month())) < (now.Year()*12 + int(now.Month()))
+	return past && depositPaid == 0
 }
 
 // monthsFromNow returns how many whole months `dateStr` (YYYY-MM-DD) is ahead of
@@ -234,11 +240,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 					undated++
 					continue
 				}
-				// A running loan with NO recorded payments implies the deposit was
-				// handed over pre-Lira (no phantom lump). But recorded increments
-				// prove Lira is tracking this deposit — keep the remainder as a
-				// due-now lump (monthsFromNow clamps past dates to next month).
-				if !futureMonth(now, when) && p.DepositPaid == 0 {
+				if depositPaidPreLira(now, when, p.DepositPaid) {
 					continue
 				}
 				m := monthsFromNow(now, when)
