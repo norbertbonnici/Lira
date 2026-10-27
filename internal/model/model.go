@@ -1313,8 +1313,13 @@ func (s *Store) UpdateTransaction(id, accountID int64, date string, amount float
 	return err
 }
 
+// DeleteTransaction removes a transaction. A transfer leg takes its partner leg
+// with it: deleting just one would leave the other moving a balance (and NAV) on
+// its own, invisible to the reports that skip transfer legs.
 func (s *Store) DeleteTransaction(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM transactions WHERE id=?`, id)
+	_, err := s.db.Exec(
+		`DELETE FROM transactions WHERE id=? OR transfer_id=(SELECT transfer_id FROM transactions WHERE id=?)`,
+		id, id)
 	return err
 }
 

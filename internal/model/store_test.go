@@ -193,6 +193,54 @@ func TestCreateTransfer(t *testing.T) {
 	}
 }
 
+// Deleting either leg of a transfer removes both, so NAV can't drift; ordinary
+// transactions still delete one row at a time.
+func TestDeleteTransferLegRemovesBoth(t *testing.T) {
+	s := testStore(t)
+	_ = s.CreateAccount("A", "savings", "EUR", 1000, false)
+	_ = s.CreateAccount("B", "savings", "EUR", 0, false)
+	accts, _ := s.ListAccounts()
+	aID, bID := accts[0].ID, accts[1].ID
+	if err := s.CreateTransfer(aID, bID, "2026-06-01", 300, ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.CreateTransaction(aID, "2026-06-02", -20, nil, "Coffee", "")
+	_ = s.CreateTransaction(aID, "2026-06-03", -30, nil, "Lunch", "")
+
+	txs, _ := s.ListTransactions(10)
+	var leg, coffee int64
+	for _, tx := range txs {
+		if tx.TransferID.Valid && tx.Amount < 0 {
+			leg = tx.ID
+		}
+		if tx.Payee == "Coffee" {
+			coffee = tx.ID
+		}
+	}
+	if err := s.DeleteTransaction(leg); err != nil {
+		t.Fatal(err)
+	}
+	txs, _ = s.ListTransactions(10)
+	for _, tx := range txs {
+		if tx.TransferID.Valid {
+			t.Errorf("orphaned transfer leg left behind: %+v", tx)
+		}
+	}
+	if len(txs) != 2 {
+		t.Errorf("txs = %d want 2 (both legs gone, other rows kept)", len(txs))
+	}
+	if _, _, total, _ := s.ComputeNAV(); total != 950 {
+		t.Errorf("NAV = %v want 950 (1000 - 20 - 30, transfer fully undone)", total)
+	}
+
+	if err := s.DeleteTransaction(coffee); err != nil {
+		t.Fatal(err)
+	}
+	if txs, _ = s.ListTransactions(10); len(txs) != 1 || txs[0].Payee != "Lunch" {
+		t.Errorf("deleting a plain transaction removed the wrong rows: %+v", txs)
+	}
+}
+
 func TestHoldingGain(t *testing.T) {
 	if g, p := HoldingGain(1200, 1000); g != 200 || p != 20 {
 		t.Errorf("gain = %v / %v%% want 200 / 20", g, p)
