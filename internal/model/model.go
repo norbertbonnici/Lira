@@ -1308,19 +1308,91 @@ func (s *Store) UpdateTransaction(id, accountID int64, date string, amount float
 	if categoryID != nil {
 		cat = *categoryID
 	}
-	_, err := s.db.Exec(
+	return s.changeTransaction(id,
 		`UPDATE transactions SET account_id=?, date=?, amount=?, category_id=?, payee=?, notes=? WHERE id=?`,
 		accountID, date, amount, cat, payee, notes, id)
-	return err
 }
 
 // DeleteTransaction removes a transaction. A transfer leg takes its partner leg
 // with it: deleting just one would leave the other moving a balance (and NAV) on
 // its own, invisible to the reports that skip transfer legs.
 func (s *Store) DeleteTransaction(id int64) error {
-	_, err := s.db.Exec(
+	return s.changeTransaction(id,
 		`DELETE FROM transactions WHERE id=? OR transfer_id=(SELECT transfer_id FROM transactions WHERE id=?)`,
 		id, id)
+}
+
+// changeTransaction runs an edit/delete of transaction id and, when that row is
+// a project-item payment, re-derives the item's done state in the same
+// transaction (see syncItemStatus). A missing id is a no-op.
+func (s *Store) changeTransaction(id int64, query string, args ...any) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var itemID sql.NullInt64
+	err = tx.QueryRow(`SELECT project_item_id FROM transactions WHERE id=?`, id).Scan(&itemID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		return err
+	}
+	if itemID.Valid {
+		if err := syncItemStatus(tx, itemID.Int64); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// syncItemStatus re-derives a project item's done flag from its ledger payments
+// after one of them was edited or deleted. The paid total is always derived, but
+// purchased/actual_cost are stored when the item closes, so without this a
+// deleted payment would leave the item "done" with money still owed (and its
+// phase dropped from the monthly saving). Rules:
+//   - done, but the payments now total less than the closing total → reopen
+//     (a payment the closing counted is gone; re-close it with a new payment);
+//   - done and still covered → stay done, actual_cost follows the new total;
+//   - open, and an edit lifted the total to the estimate → close it.
+//
+// transaction_id is re-pointed at the latest remaining payment (or NULL).
+// Legacy items closed without a recorded closing total are left as they are.
+func syncItemStatus(tx *sql.Tx, itemID int64) error {
+	var estimated, paid float64
+	var purchased bool
+	var actual sql.NullFloat64
+	var latest sql.NullInt64
+	if err := tx.QueryRow(
+		`SELECT estimated_cost, purchased, actual_cost,
+		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0),
+		        (SELECT MAX(t.id) FROM transactions t WHERE t.project_item_id=project_items.id)
+		 FROM project_items WHERE id=?`, itemID).
+		Scan(&estimated, &purchased, &actual, &paid, &latest); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // item deleted; nothing to sync
+		}
+		return err
+	}
+	done := purchased
+	switch {
+	case purchased && !actual.Valid:
+		return nil // legacy close with no recorded total: nothing to compare against
+	case purchased && paid+0.005 < actual.Float64:
+		done = false
+	case !purchased && estimated > 0 && paid+0.005 >= estimated:
+		done = true
+	}
+	var actualCost any
+	if done {
+		actualCost = paid
+	}
+	_, err := tx.Exec(`UPDATE project_items SET purchased=?, actual_cost=?, transaction_id=? WHERE id=?`,
+		done, actualCost, latest, itemID)
 	return err
 }
 
@@ -1948,22 +2020,25 @@ func (s *Store) CountUnpurchasedItems(projectID int64) (int, error) {
 // purchased (done) when `final` is set or the cumulative payments reach the
 // estimate, so a deposit leaves it open while the closing payment completes it.
 func (s *Store) PayItem(itemID, accountID int64, date string, amount float64, categoryID *int64, final bool) error {
-	var projectID int64
-	var name string
-	var estimated, paid float64
-	// paid is the ledger-derived total so far (before the payment we're about to add).
-	if err := s.db.QueryRow(
-		`SELECT project_id, name, estimated_cost,
-		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0)
-		 FROM project_items WHERE id=?`, itemID).
-		Scan(&projectID, &name, &estimated, &paid); err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var projectID int64
+	var name string
+	var estimated, paid float64
+	var wasDone bool
+	// paid is the ledger-derived total so far (before the payment we're about to
+	// add). It's read inside the transaction so two concurrent payments can't both
+	// see the same old total and leave a fully paid item open.
+	if err := tx.QueryRow(
+		`SELECT project_id, name, estimated_cost, purchased,
+		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0)
+		 FROM project_items WHERE id=?`, itemID).
+		Scan(&projectID, &name, &estimated, &wasDone, &paid); err != nil {
+		return err
+	}
 	var cat any
 	if categoryID != nil {
 		cat = *categoryID
@@ -1982,8 +2057,9 @@ func (s *Store) PayItem(itemID, accountID int64, date string, amount float64, ca
 	// Done when the user flags this the final payment, or (for an estimated item) the
 	// running total covers the estimate — within half a cent so float drift doesn't
 	// leave it a cent short. A zero-estimate item completes only on the explicit flag,
-	// so it can still take a deposit first.
-	done := final || (estimated > 0 && newPaid+0.005 >= estimated)
+	// so it can still take a deposit first. An item already closed stays closed (a
+	// late extra payment, or a double-submitted form, must not reopen it).
+	done := final || wasDone || (estimated > 0 && newPaid+0.005 >= estimated)
 	var actual any // actual_cost: the final total once done, else NULL (in progress)
 	purchased := 0
 	if done {

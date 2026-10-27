@@ -1464,3 +1464,117 @@ func TestMonthlyTotalsAndSpendByCategoryConvertToEUR(t *testing.T) {
 		t.Errorf("SpendByCategory = %+v want Groceries 165 (merged across currencies), Uncategorized 23", ct)
 	}
 }
+
+// itemFixture makes an account and a project with one item of the given estimate.
+func itemFixture(t *testing.T, s *Store, estimate float64) (acctID, itemID int64) {
+	t.Helper()
+	if err := s.CreateAccount("Bank", "savings", "EUR", 10000, false); err != nil {
+		t.Fatal(err)
+	}
+	accts, _ := s.ListAccounts()
+	pid, err := s.CreateProjectInput(ProjectInput{Name: "Kitchen", TargetDate: "2026-12-01", Status: "saving", FinanceMethod: "save"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateProjectItem(pid, nil, "Oven", estimate, true); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := s.ListProjectItems(pid)
+	return accts[0].ID, items[0].ID
+}
+
+// The done flag must follow the ledger: deleting or shrinking a payment that the
+// closing counted reopens the item; editing it back up closes it again.
+func TestItemStatusFollowsPaymentEditsAndDeletes(t *testing.T) {
+	s := testStore(t)
+	acct, item := itemFixture(t, s, 500)
+	_ = s.PayItem(item, acct, "2026-06-01", 200, nil, false)
+	_ = s.PayItem(item, acct, "2026-07-01", 300, nil, false)
+	it, _ := s.GetProjectItem(item)
+	if !it.Purchased || !it.ActualCost.Valid || it.ActualCost.Float64 != 500 {
+		t.Fatalf("after 200+300 of 500: %+v want purchased, actual 500", it)
+	}
+	pays, _ := s.ListItemPayments(item)
+	var p200, p300 int64
+	for _, p := range pays {
+		if p.Amount == -200 {
+			p200 = p.ID
+		} else {
+			p300 = p.ID
+		}
+	}
+
+	if err := s.DeleteTransaction(p300); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = s.GetProjectItem(item)
+	if it.Purchased || it.ActualCost.Valid || it.AmountPaid != 200 {
+		t.Errorf("after deleting the 300: %+v want open, actual NULL, paid 200", it)
+	}
+	if !it.TransactionID.Valid || it.TransactionID.Int64 != p200 {
+		t.Errorf("transaction_id = %+v want the remaining payment %d", it.TransactionID, p200)
+	}
+	if n, _ := s.CountUnpurchasedItems(it.ProjectID); n != 1 {
+		t.Errorf("unpurchased items = %d want 1", n)
+	}
+
+	// Editing the remaining payment up to the estimate closes the item again.
+	if err := s.UpdateTransaction(p200, acct, "2026-06-01", -500, nil, "Oven", ""); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = s.GetProjectItem(item)
+	if !it.Purchased || it.ActualCost.Float64 != 500 {
+		t.Errorf("after editing to 500: %+v want purchased, actual 500", it)
+	}
+	// An edit that keeps it covered moves actual_cost with it.
+	_ = s.UpdateTransaction(p200, acct, "2026-06-01", -520, nil, "Oven", "")
+	if it, _ = s.GetProjectItem(item); !it.Purchased || it.ActualCost.Float64 != 520 {
+		t.Errorf("after editing to 520: %+v want purchased, actual 520", it)
+	}
+
+	// Deleting the last payment fully reopens the item.
+	_ = s.DeleteTransaction(p200)
+	it, _ = s.GetProjectItem(item)
+	if it.Purchased || it.ActualCost.Valid || it.TransactionID.Valid || it.AmountPaid != 0 {
+		t.Errorf("after deleting every payment: %+v want open with no payments", it)
+	}
+}
+
+// An item closed early with "final" stays closed when a further, non-final
+// payment arrives (e.g. a double-submitted form) — it must not reopen.
+func TestPayItemKeepsClosedItemClosed(t *testing.T) {
+	s := testStore(t)
+	acct, item := itemFixture(t, s, 100)
+	_ = s.PayItem(item, acct, "2026-06-01", 60, nil, true)
+	_ = s.PayItem(item, acct, "2026-06-02", 10, nil, false)
+	it, _ := s.GetProjectItem(item)
+	if !it.Purchased || it.ActualCost.Float64 != 70 {
+		t.Errorf("closed item after an extra payment: %+v want purchased, actual 70", it)
+	}
+}
+
+// Concurrent payments must see each other's totals: two halves of the estimate
+// paid at once leave the item fully paid AND closed.
+func TestPayItemConcurrentPaymentsClose(t *testing.T) {
+	for run := 0; run < 20; run++ {
+		s := testStore(t)
+		acct, item := itemFixture(t, s, 100)
+		errs := make(chan error, 2)
+		start := make(chan struct{})
+		for i := 0; i < 2; i++ {
+			go func() {
+				<-start
+				errs <- s.PayItem(item, acct, "2026-06-01", 50, nil, false)
+			}()
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if it, _ := s.GetProjectItem(item); it.AmountPaid != 100 || !it.Purchased {
+			t.Fatalf("run %d: %+v want paid 100 and purchased", run, it)
+		}
+	}
+}
