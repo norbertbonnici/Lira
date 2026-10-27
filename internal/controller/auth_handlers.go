@@ -203,7 +203,13 @@ func (c *Controller) Login(w http.ResponseWriter, r *http.Request) {
 		invalid()
 		return
 	}
-	_ = c.store.ResetFailedLogin(user.ID)
+	// The password alone only clears the shared lockout counter when there is no
+	// second factor to pass. With TOTP on, TwoFAVerify resets it after a good
+	// code; resetting here would let a password holder re-login after every 4
+	// wrong codes and brute-force the TOTP without ever hitting the lockout.
+	if !user.TOTPEnabled {
+		_ = c.store.ResetFailedLogin(user.ID)
+	}
 
 	// mfaPassed only when the user has no TOTP yet (they'll be sent to setup);
 	// otherwise they must clear the verify step.
