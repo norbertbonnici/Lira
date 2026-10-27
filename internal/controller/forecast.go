@@ -57,18 +57,31 @@ func etaLabel(start time.Time, months int) string {
 
 // buildCashLedger renders the burn-down as a chronological event list: between
 // spend clusters it folds in the saving that accrued (a green "Saving × N mo"
-// row) and — as its own explicit red row — any loan repayments in that window
-// ("Loan payments × K mo"), then draws each spend down sequentially. If loan
-// repayments continue past the final spend, a trailing Saving/Loan-payments pair
-// covers the rest of the horizon, so the last row's Cash equals the chart's end
-// balance instead of the timeline silently stopping while payments keep running.
-// The running balance reconciles with BuildBurnDown at every month boundary.
-func buildCashLedger(cash, monthlyIn float64, outs map[int]float64, spends []burnSpend, labels []string, months int) []cashRow {
+// row), the money set aside for projects in that window (a green "Saving for
+// projects × K mo" row) and — as its own explicit red row — any loan
+// repayments in that window ("Loan payments × K mo"), then draws each spend
+// down sequentially. If loan repayments continue past the final spend, a
+// trailing Saving/Loan-payments pair covers the rest of the horizon, so the
+// last row's Cash equals the chart's end balance instead of the timeline
+// silently stopping while payments keep running. The running balance
+// reconciles with BuildBurnDown at every month boundary.
+func buildCashLedger(cash, monthlyIn float64, ins, outs map[int]float64, spends []burnSpend, labels []string, months int) []cashRow {
 	sort.SliceStable(spends, func(i, j int) bool { return spends[i].Month < spends[j].Month })
-	// Prefix sums of the loan outflows, so each window's total is O(1).
+	// Prefix sums of the per-month flows, so each window's total is O(1).
+	inPre := make([]float64, months+1)
 	outPre := make([]float64, months+1)
 	for m := 1; m <= months; m++ {
+		inPre[m] = inPre[m-1] + ins[m]
 		outPre[m] = outPre[m-1] + outs[m]
+	}
+	activeMonths := func(flow map[int]float64, from, to int) int {
+		k := 0
+		for i := from + 1; i <= to; i++ {
+			if flow[i] > 0 {
+				k++
+			}
+		}
+		return k
 	}
 	ledger := make([]cashRow, 0, len(spends))
 	running := cash
@@ -83,13 +96,13 @@ func buildCashLedger(cash, monthlyIn float64, outs map[int]float64, spends []bur
 			running += add
 			ledger = append(ledger, cashRow{Kind: "save", Label: "Saving", When: labels[to], Amount: add, Balance: running, Months: gap})
 		}
+		if windowIn := inPre[to] - inPre[from]; windowIn > 0 {
+			running += windowIn
+			ledger = append(ledger, cashRow{Kind: "save", Label: "Saving for projects", When: labels[to],
+				Amount: windowIn, Balance: running, Months: activeMonths(ins, from, to)})
+		}
 		if windowOut := outPre[to] - outPre[from]; windowOut > 0 {
-			k := 0
-			for i := from + 1; i <= to; i++ {
-				if outs[i] > 0 {
-					k++
-				}
-			}
+			k := activeMonths(outs, from, to)
 			label := "Loan payment"
 			if k > 1 {
 				label = fmt.Sprintf("Loan payments × %d mo", k)
@@ -108,11 +121,27 @@ func buildCashLedger(cash, monthlyIn float64, outs map[int]float64, spends []bur
 		}
 		last = m
 	}
-	// Repayments outlasting the final spend: show the rest of the horizon too.
-	if outPre[months]-outPre[last] > 0 {
+	// Flows outlasting the final spend: show the rest of the horizon too.
+	if outPre[months]-outPre[last] > 0 || inPre[months]-inPre[last] > 0 {
 		accrue(last, months)
 	}
 	return ledger
+}
+
+// addSavingStream adds a project group's monthly saving to the per-month inflows
+// for months 1..monthsLeft (at least month 1, so an overdue group's "due now"
+// amount lands before its month-1 lump). monthsLeft never exceeds the group's
+// lump month (both count calendar months from now; monthsLeft floors by day).
+func addSavingStream(ins map[int]float64, monthly float64, monthsLeft int) {
+	if monthly <= 0 {
+		return
+	}
+	if monthsLeft < 1 {
+		monthsLeft = 1
+	}
+	for m := 1; m <= monthsLeft; m++ {
+		ins[m] += monthly
+	}
 }
 
 // addLoanStream adds a loan's monthly repayment to the per-month outflows from
@@ -126,14 +155,20 @@ func addLoanStream(outs map[int]float64, startMonth, monthsLeft, horizon int, mo
 	}
 }
 
-// futureMonth reports whether dateStr (YYYY-MM-DD) falls in a month strictly
-// after now's month. False for empty/unparseable dates.
-func futureMonth(now time.Time, dateStr string) bool {
-	d, err := time.Parse("2006-01-02", dateStr)
+// depositPaidPreLira reports whether an unpaid-looking loan deposit should be
+// left out of the burn-down: its due month (`when`, YYYY-MM-DD) is already
+// BEFORE the current month and no payments are recorded, which implies it was
+// handed over before Lira tracked it (no phantom lump). A deposit due THIS month
+// is still upcoming, and recorded increments prove Lira is tracking it — both
+// keep the remainder as a lump (monthsFromNow clamps past dates to next month).
+// An unparseable date is skipped too, as there is no month to put it in.
+func depositPaidPreLira(now time.Time, when string, depositPaid float64) bool {
+	d, err := time.Parse("2006-01-02", when)
 	if err != nil {
-		return false
+		return true
 	}
-	return (d.Year()*12 + int(d.Month())) > (now.Year()*12 + int(now.Month()))
+	past := (d.Year()*12 + int(d.Month())) < (now.Year()*12 + int(now.Month()))
+	return past && depositPaid == 0
 }
 
 // monthsFromNow returns how many whole months `dateStr` (YYYY-MM-DD) is ahead of
@@ -202,6 +237,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 	}
 
 	events := map[int]float64{}
+	ins := map[int]float64{}  // money set aside for save-financed projects
 	outs := map[int]float64{} // recurring outflows: upcoming loan repayments
 	var spends []burnSpend
 	var undated, beyond int
@@ -234,11 +270,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 					undated++
 					continue
 				}
-				// A running loan with NO recorded payments implies the deposit was
-				// handed over pre-Lira (no phantom lump). But recorded increments
-				// prove Lira is tracking this deposit — keep the remainder as a
-				// due-now lump (monthsFromNow clamps past dates to next month).
-				if !futureMonth(now, when) && p.DepositPaid == 0 {
+				if depositPaidPreLira(now, when, p.DepositPaid) {
 					continue
 				}
 				m := monthsFromNow(now, when)
@@ -266,6 +298,13 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			events[m] += g.Plan.Remaining
+			// The planned saving (Settings) is what the budget leaves free AFTER
+			// project commitments, so this group's own monthly saving isn't in it:
+			// add it back until its date, else the lump would be paid from cash
+			// that was never credited. It covers ToSave by the lump month (an
+			// overdue group's is due now, month 1), so the lump nets down to just
+			// the financed share drawn from existing cash.
+			addSavingStream(ins, g.Plan.MonthlyToSave, g.Plan.MonthsLeft)
 			label := p.Name
 			if !g.IsGeneral {
 				label = p.Name + " · " + g.Name
@@ -274,7 +313,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pts := model.BuildBurnDown(cash, monthlyIn, outs, events, months)
+	pts := model.BuildBurnDown(cash, monthlyIn, ins, outs, events, months)
 	labels := monthLabels(now, months)
 	bal := make([]float64, len(pts))
 	spd := make([]float64, len(pts))
@@ -285,7 +324,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 			low, lowMonth = p.Balance, p.Month
 		}
 	}
-	ledger := buildCashLedger(cash, monthlyIn, outs, spends, labels, months)
+	ledger := buildCashLedger(cash, monthlyIn, ins, outs, spends, labels, months)
 
 	c.render(w, r, "burndown.html", map[string]any{
 		"StartCash":    cash,
@@ -302,6 +341,7 @@ func (c *Controller) BurnDown(w http.ResponseWriter, r *http.Request) {
 		"NoSpends":     len(spends) == 0,
 		"NoSavings":    monthlyIn <= 0,
 		"HasLoanOuts":  len(outs) > 0, // upcoming loan repayments are deducted
+		"HasProjectIn": len(ins) > 0,  // project savings are added back until each purchase
 	})
 }
 

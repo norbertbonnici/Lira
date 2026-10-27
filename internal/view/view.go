@@ -121,13 +121,13 @@ func navChart(s ChartSeries) template.HTML {
 	const padL, padR, padT, padB = 58.0, 14.0, 12.0, 28.0
 	plotW, plotH := w-padL-padR, h-padT-padB
 
+	// The range covers every drawn edge: Total (top of the stack), Cash (the
+	// cash area's edge, below zero for e.g. a mortgage account), and 0 (the
+	// baseline) — Total alone let a negative cash area spill off the canvas.
 	yMax, yMin := s.Total[0], 0.0
-	for _, v := range s.Total {
-		if v > yMax {
-			yMax = v
-		}
-		if v < yMin {
-			yMin = v
+	for _, series := range [][]float64{s.Total, s.Cash} {
+		for _, v := range series {
+			yMax, yMin = max(yMax, v), min(yMin, v)
 		}
 	}
 	if yMax <= yMin {
@@ -201,29 +201,30 @@ func forecastChart(s ForecastSeries) template.HTML {
 	const padL, padR, padT, padB = 58.0, 14.0, 12.0, 28.0
 	plotW, plotH := w-padL-padR, h-padT-padB
 
-	yMax := 0.0
+	// Range over both lines, the target and 0; a line can go negative (e.g.
+	// net worth with a negative actual saving rate), which a 0 floor clipped.
+	yMax, yMin := max(s.Target, 0), 0.0
 	for i := 0; i < n; i++ {
-		if s.Planned[i] > yMax {
-			yMax = s.Planned[i]
-		}
-		if i < len(s.Actual) && s.Actual[i] > yMax {
-			yMax = s.Actual[i]
+		yMax, yMin = max(yMax, s.Planned[i]), min(yMin, s.Planned[i])
+		if i < len(s.Actual) {
+			yMax, yMin = max(yMax, s.Actual[i]), min(yMin, s.Actual[i])
 		}
 	}
-	if s.Target > yMax {
-		yMax = s.Target
+	if yMax <= yMin {
+		yMax = yMin + 1
 	}
-	if yMax <= 0 {
-		yMax = 1
+	pad := (yMax - yMin) * 0.05
+	yMax += pad
+	if yMin < 0 {
+		yMin -= pad
 	}
-	yMax *= 1.05
 	x := func(i int) float64 { return padL + float64(i)/float64(n-1)*plotW }
-	y := func(v float64) float64 { return padT + (yMax-v)/yMax*plotH }
+	y := func(v float64) float64 { return padT + (yMax-v)/(yMax-yMin)*plotH }
 
 	var b strings.Builder
 	b.WriteString(`<svg class="navchart" viewBox="0 0 760 240" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Net worth forecast">`)
 	for i := 0; i <= 3; i++ {
-		gv := yMax * float64(i) / 3
+		gv := yMin + (yMax-yMin)*float64(i)/3
 		gy := y(gv)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#e6e0d4"/>`, padL, gy, w-padR, gy)
 		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="#726c61" font-size="10" text-anchor="end">%s</text>`, padL-6, gy+3, shortEUR(gv))
@@ -475,11 +476,16 @@ func (v *View) StaticHandler() http.Handler {
 // ---------- display funcs ----------
 
 func eur(val float64) string {
-	neg := val < 0
-	if neg {
-		val = -val
+	// A NaN/Inf (e.g. from a division upstream) has no "." to split on and
+	// would panic, failing the whole page render; show a dash instead.
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return "\u20ac—"
 	}
-	s := strconv.FormatFloat(val, 'f', 2, 64)
+	neg := val < 0
+	s := strconv.FormatFloat(math.Abs(val), 'f', 2, 64) // Abs also clears a -0
+	if s == "0.00" {
+		neg = false // float leftovers like -0.001 show as €0.00, not "-€0.00"
+	}
 	dot := strings.IndexByte(s, '.')
 	intPart, frac := s[:dot], s[dot+1:]
 	var b strings.Builder
@@ -498,10 +504,12 @@ func eur(val float64) string {
 }
 
 func signClass(val float64) string {
+	// Under half a cent either way is zero, matching what eur displays, so a
+	// float leftover like -0.001 isn't coloured as a loss.
 	switch {
-	case val > 0:
+	case val >= 0.005:
 		return "pos"
-	case val < 0:
+	case val <= -0.005:
 		return "neg"
 	default:
 		return "zero"

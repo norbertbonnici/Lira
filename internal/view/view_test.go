@@ -2,7 +2,10 @@ package view
 
 import (
 	"database/sql"
+	"math"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -223,7 +226,7 @@ func TestTemplatesParseAndExecute(t *testing.T) {
 		"holding_form.html":     {{"User": usr, "CSRF": "x", "Holding": &model.Holding{Kind: "stock", Currency: "EUR"}, "Action": "/holdings", "Heading": "New holding"}, {"User": usr, "CSRF": "x", "Holding": &holds[0], "Action": "/holdings/1", "Heading": "Edit holding"}},
 		"reports.html":          {{"User": usr, "CSRF": "x"}},
 		"pocket.html":           {{"User": usr, "CSRF": "x", "Balance": 70.0, "ToppedUp": 100.0, "Spent": 30.0, "Categories": []model.CategoryTotal{{Category: "Beers", Amount: 30}}, "TopCat": 30.0, "DateVal": "2026-06-01", "Entries": []model.PocketEntry{{ID: 1, Date: "2026-06-02", Amount: -30, Category: "Beers", Note: "with the boys"}, {ID: 2, Date: "2026-06-01", Amount: 100, Category: "Allowance"}}, "Tokens": []model.APIToken{{ID: 1, Name: "iPhone", CreatedAt: "2026-06-01T10:00:00Z"}}, "NewToken": "lira_xyz"}, {"User": usr, "CSRF": "x", "Balance": 0.0, "ToppedUp": 0.0, "Spent": 0.0, "TopCat": 0.0, "DateVal": "2026-06-01"}},
-		"burndown.html":         {{"User": usr, "CSRF": "x", "StartCash": 100000.0, "MonthlyIn": 2000.0, "Months": 36, "Chart": BurnSeries{Labels: []string{"May 2026", "Jun 2026", "Jul 2026"}, Balance: []float64{100000, 102000, 24000}, Spend: []float64{0, 0, 80000}}, "Ledger": []cashRowV{{Kind: "save", Label: "Saving", When: "Jul 2026", Amount: 4000, Balance: 104000, Months: 2}, {Kind: "spend", Label: "New car", When: "2026-07-01", Amount: 80000, Balance: 24000}}, "EndBalance": 92000.0, "Low": 24000.0, "LowDate": "Jul 2026", "GoesNegative": false, "Undated": 0, "Beyond": 0, "NoSpends": false, "NoSavings": false}, {"User": usr, "CSRF": "x", "StartCash": 1000.0, "MonthlyIn": 0.0, "Months": 36, "Chart": BurnSeries{Labels: []string{"May 2026", "Jun 2026"}, Balance: []float64{1000, -4000}, Spend: []float64{0, 5000}}, "Ledger": []cashRowV{}, "EndBalance": -4000.0, "Low": -4000.0, "LowDate": "Jun 2026", "GoesNegative": true, "Undated": 1, "Beyond": 1, "NoSpends": true, "NoSavings": true}, {"User": usr, "CSRF": "x", "StartCash": 5000.0, "MonthlyIn": 300.0, "Months": 24, "HasLoanOuts": true, "Chart": BurnSeries{Labels: []string{"Aug 2026", "Sep 2026", "Oct 2026"}, Balance: []float64{5000, 4900, 4800}, Spend: []float64{0, 0, 0}}, "Ledger": []cashRowV{{Kind: "save", Label: "Saving", When: "Oct 2026", Amount: 600, Balance: 5600, Months: 2}, {Kind: "spend", Label: "Loan payments × 2 mo", When: "to Oct 2026", Amount: 800, Balance: 4800}, {Kind: "spend", Label: "Solar · loan deposit", When: "2026-10-01", Amount: 1500, Balance: 3300}, {Kind: "save", Label: "Saving", When: "Aug 2028", Amount: 6600, Balance: 9900, Months: 22}, {Kind: "spend", Label: "Loan payments × 22 mo", When: "to Aug 2028", Amount: 8800, Balance: 1100}}, "EndBalance": 1100.0, "Low": 1100.0, "LowDate": "Aug 2028", "GoesNegative": false, "Undated": 0, "Beyond": 0, "NoSpends": false, "NoSavings": false}},
+		"burndown.html":         {{"User": usr, "CSRF": "x", "StartCash": 100000.0, "MonthlyIn": 2000.0, "Months": 36, "Chart": BurnSeries{Labels: []string{"May 2026", "Jun 2026", "Jul 2026"}, Balance: []float64{100000, 102000, 24000}, Spend: []float64{0, 0, 80000}}, "HasProjectIn": true, "Ledger": []cashRowV{{Kind: "save", Label: "Saving", When: "Jul 2026", Amount: 4000, Balance: 104000, Months: 2}, {Kind: "save", Label: "Saving for projects", When: "Jul 2026", Amount: 1500, Balance: 105500, Months: 2}, {Kind: "spend", Label: "New car", When: "2026-07-01", Amount: 80000, Balance: 24000}}, "EndBalance": 92000.0, "Low": 24000.0, "LowDate": "Jul 2026", "GoesNegative": false, "Undated": 0, "Beyond": 0, "NoSpends": false, "NoSavings": false}, {"User": usr, "CSRF": "x", "StartCash": 1000.0, "MonthlyIn": 0.0, "Months": 36, "Chart": BurnSeries{Labels: []string{"May 2026", "Jun 2026"}, Balance: []float64{1000, -4000}, Spend: []float64{0, 5000}}, "Ledger": []cashRowV{}, "EndBalance": -4000.0, "Low": -4000.0, "LowDate": "Jun 2026", "GoesNegative": true, "Undated": 1, "Beyond": 1, "NoSpends": true, "NoSavings": true}, {"User": usr, "CSRF": "x", "StartCash": 5000.0, "MonthlyIn": 300.0, "Months": 24, "HasLoanOuts": true, "Chart": BurnSeries{Labels: []string{"Aug 2026", "Sep 2026", "Oct 2026"}, Balance: []float64{5000, 4900, 4800}, Spend: []float64{0, 0, 0}}, "Ledger": []cashRowV{{Kind: "save", Label: "Saving", When: "Oct 2026", Amount: 600, Balance: 5600, Months: 2}, {Kind: "spend", Label: "Loan payments × 2 mo", When: "to Oct 2026", Amount: 800, Balance: 4800}, {Kind: "spend", Label: "Solar · loan deposit", When: "2026-10-01", Amount: 1500, Balance: 3300}, {Kind: "save", Label: "Saving", When: "Aug 2028", Amount: 6600, Balance: 9900, Months: 22}, {Kind: "spend", Label: "Loan payments × 22 mo", When: "to Aug 2028", Amount: 8800, Balance: 1100}}, "EndBalance": 1100.0, "Low": 1100.0, "LowDate": "Aug 2028", "GoesNegative": false, "Undated": 0, "Beyond": 0, "NoSpends": false, "NoSavings": false}},
 		"forecast.html":         {{"User": usr, "CSRF": "x", "StartNAV": 50000.0, "Planned": 1500.0, "Actual": 1200.0, "Target": 500000.0, "HasTarget": true, "Return": 5.0, "Months": 120, "Years": []fcYear{{Year: 0, Label: "May 2026", Planned: 50000, Actual: 50000}, {Year: 1, Label: "May 2027", Planned: 68000, Actual: 64400, PlannedHit: false}}, "Chart": ForecastSeries{Labels: []string{"May 2026", "Jun 2026", "Jul 2026"}, Planned: []float64{50000, 51500, 53000}, Actual: []float64{50000, 51200, 52400}, Target: 500000}, "PlannedETAMonths": 180, "PlannedETA": "May 2041", "ActualETAMonths": -1, "ActualETA": "", "NoSavings": false}, {"User": usr, "CSRF": "x", "StartNAV": 0.0, "Planned": 0.0, "Actual": 0.0, "Target": 0.0, "HasTarget": false, "Return": 0.0, "Months": 120, "Years": []fcYear{{Year: 0, Label: "May 2026"}}, "Chart": ForecastSeries{Labels: []string{"May 2026", "Jun 2026"}, Planned: []float64{0, 0}, Actual: []float64{0, 0}}, "PlannedETAMonths": -1, "PlannedETA": "", "ActualETAMonths": -1, "ActualETA": "", "NoSavings": true}},
 		"settings.html":         {{"User": usr, "CSRF": "x", "Household": hh, "Members": members, "Invites": invites, "Available": 1800.0, "Tokens": []model.APIToken{{ID: 1, Name: "iPhone", CreatedAt: "2026-06-01T10:00:00Z", LastUsedAt: "2026-06-02T08:00:00Z"}}, "NewToken": "lira_abc123"}, {"User": usr, "CSRF": "x", "Household": hh, "Members": members, "Invites": invites, "InviteLink": "https://lira.example.com/invite/tok", "Flash": "copied", "Available": 0.0, "Tokens": []model.APIToken{}}},
 		"invite.html":           {{"CSRF": "x", "Token": "tok", "Label": "demo_member"}, {"CSRF": "x", "Invalid": true}},
@@ -301,10 +304,60 @@ func TestShortEUR(t *testing.T) {
 }
 
 func TestEUR(t *testing.T) {
-	cases := map[float64]string{0: "\u20ac0.00", 1234.5: "\u20ac1,234.50", -1000000: "-\u20ac1,000,000.00", 12.345: "\u20ac12.35"}
+	cases := map[float64]string{0: "\u20ac0.00", 1234.5: "\u20ac1,234.50", -1000000: "-\u20ac1,000,000.00", 12.345: "\u20ac12.35",
+		-0.001: "\u20ac0.00", math.Copysign(0, -1): "\u20ac0.00", -0.005: "-\u20ac0.01",
+		math.NaN(): "\u20ac—", math.Inf(1): "\u20ac—", math.Inf(-1): "\u20ac—"}
 	for in, want := range cases {
 		if got := eur(in); got != want {
 			t.Errorf("eur(%v)=%q want %q", in, got, want)
+		}
+	}
+	for in, want := range map[float64]string{-0.001: "zero", 0.004: "zero", 0.005: "pos", -0.01: "neg", math.NaN(): "zero"} {
+		if got := signClass(in); got != want {
+			t.Errorf("signClass(%v)=%q want %q", in, got, want)
+		}
+	}
+}
+
+// svgYs returns every y coordinate in an SVG's points="x,y ..." lists and
+// cy="…" attributes.
+func svgYs(svg string) []float64 {
+	var ys []float64
+	for _, m := range regexp.MustCompile(`points="([^"]*)"`).FindAllStringSubmatch(svg, -1) {
+		for _, pair := range strings.Fields(m[1]) {
+			if _, yStr, ok := strings.Cut(pair, ","); ok {
+				y, _ := strconv.ParseFloat(yStr, 64)
+				ys = append(ys, y)
+			}
+		}
+	}
+	for _, m := range regexp.MustCompile(`cy="([-0-9.]+)"`).FindAllStringSubmatch(svg, -1) {
+		y, _ := strconv.ParseFloat(m[1], 64)
+		ys = append(ys, y)
+	}
+	return ys
+}
+
+// Negative values stay inside the 240-high canvas: a negative cash balance
+// under positive investments, and forecast lines that dip below zero.
+func TestChartsKeepNegativesOnCanvas(t *testing.T) {
+	charts := map[string]string{
+		"navChart": string(navChart(ChartSeries{Labels: []string{"a", "b", "c"},
+			Cash: []float64{-50000, -48000, -46000}, Inv: []float64{200000, 205000, 210000},
+			Total: []float64{150000, 157000, 164000}})),
+		"forecastChart": string(forecastChart(ForecastSeries{Labels: []string{"a", "b", "c"},
+			Planned: []float64{1000, 500, 0}, Actual: []float64{1000, -2000, -5000}, Target: 3000})),
+	}
+	for name, svg := range charts {
+		ys := svgYs(svg)
+		if len(ys) == 0 {
+			t.Fatalf("%s: no coordinates found", name)
+		}
+		for _, y := range ys {
+			if y < 0 || y > 240 {
+				t.Errorf("%s: y=%.1f outside the 0–240 canvas", name, y)
+				break
+			}
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -64,11 +65,7 @@ func main() {
 	if cfg.MarketAPIKey != "" {
 		td := market.TwelveData{APIKey: cfg.MarketAPIKey}
 		refresh = func(ctx context.Context) error {
-			if _, err := market.UpdateFX(ctx, td, store); err != nil {
-				return err
-			}
-			_, err := market.UpdatePrices(ctx, td, store)
-			return err
+			return market.Refresh(ctx, td, store, td, store)
 		}
 		c.SetRefresh(refresh)
 		log.Printf("market data: Twelve Data enabled (interval %s)", cfg.FetchInterval)
@@ -203,7 +200,7 @@ func main() {
 	mux.HandleFunc("POST /settings/invite/{id}/delete", c.Protect(c.AdminOnly(c.InviteRevoke)))
 	mux.HandleFunc("GET /backup", c.Protect(c.AdminOnly(c.BackupDownload)))
 
-	handler := securityHeaders(recoverMW(logMW(mux)))
+	handler := securityHeaders(recoverMW(logMW(limitBody(mux))))
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -305,6 +302,25 @@ func recoverMW(next http.Handler) http.Handler {
 				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
 		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// defaultBodyLimit caps every request body (forms, JSON API) unless a route
+// needs more. Without it, the first r.FormValue — checkCSRF's, even on the
+// public /login — parses a multipart body with Go's 32 MB-in-memory default
+// and spills the rest to disk, unbounded: an easy way to exhaust a ZimaBoard.
+const defaultBodyLimit = 1 << 20
+
+// limitBody wraps each request body in http.MaxBytesReader: the CSV import
+// routes get controller.ImportBodyLimit, everything else defaultBodyLimit.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int64(defaultBodyLimit)
+		if strings.HasPrefix(r.URL.Path, "/transactions/import/") {
+			n = controller.ImportBodyLimit
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, n)
 		next.ServeHTTP(w, r)
 	})
 }
