@@ -823,6 +823,13 @@ func TestComputePlan(t *testing.T) {
 	if !odp.Overdue || odp.MonthlyToSave != 1000 || odp.ToSave != 1000 {
 		t.Errorf("overdue, 9k of 10k paid = %+v want 1000 due now", odp)
 	}
+	// An out-of-range finance % (stored before the form validated it) is clamped.
+	if over := ComputePlan(1000, 0, 150, 0, "2026-12-01", now); over.Financed != 1000 || over.ToSave != 0 {
+		t.Errorf("finance 150%% = %+v want financed 1000, nothing to save", over)
+	}
+	if under := ComputePlan(1000, 0, -50, 0, "2026-12-01", now); under.Financed != 0 || under.ToSave != 1000 {
+		t.Errorf("finance -50%% = %+v want financed 0, save 1000", under)
+	}
 	// Overpaid never goes negative.
 	if op := ComputePlan(1000, 1200, 0, 0, "2026-12-01", now); op.ToSave != 0 || op.MonthlyToSave != 0 {
 		t.Errorf("overpaid plan = %+v want nothing to save", op)

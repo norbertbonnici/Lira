@@ -261,6 +261,15 @@ func validateProject(in model.ProjectInput) string {
 	if in.FinanceMethod == "loan" && in.LoanTermMonths <= 0 {
 		return "A loan term (months) is required when financing with a loan."
 	}
+	if in.FinancePct < 0 || in.FinancePct > 100 {
+		return "Finance from savings must be between 0 and 100%."
+	}
+	if in.BufferPct < 0 {
+		return "Contingency buffer can't be negative."
+	}
+	if in.LoanDeposit < 0 || in.LoanAPR < 0 {
+		return "Loan deposit and APR can't be negative."
+	}
 	if in.LoanStartDate != "" {
 		if _, err := time.Parse("2006-01-02", in.LoanStartDate); err != nil {
 			return "Loan start date must be a valid date (YYYY-MM-DD)."
@@ -349,22 +358,30 @@ func (c *Controller) LoanUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := pathID(r)
+	p, err := c.store.GetProject(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	term := int(parseFloat(r.FormValue("loan_term_months")))
 	if term < 0 {
 		term = 0
 	}
+	// A loan-financed project always has a term (validateProject enforces it on
+	// the edit form); a blank or zero term here would silently turn it into a
+	// target-date saving plan, so keep the stored one.
+	if term == 0 && p.FinanceMethod == "loan" {
+		term = p.LoanTermMonths
+	}
 	start := strings.TrimSpace(r.FormValue("loan_start_date"))
 	if start != "" {
 		if _, err := time.Parse("2006-01-02", start); err != nil {
-			// Unparseable input must not wipe a previously stored date.
-			if p, perr := c.store.GetProject(id); perr == nil {
-				start = p.LoanStartDate
-			} else {
-				start = ""
-			}
+			start = p.LoanStartDate // unparseable input must not wipe a stored date
 		}
 	}
-	_ = c.store.UpdateProjectLoan(id, parseFloat(r.FormValue("loan_deposit")), parseFloat(r.FormValue("loan_apr")), term, start)
+	deposit := max(parseFloat(r.FormValue("loan_deposit")), 0)
+	apr := max(parseFloat(r.FormValue("loan_apr")), 0)
+	_ = c.store.UpdateProjectLoan(id, deposit, apr, term, start)
 	http.Redirect(w, r, projectURL(id), http.StatusSeeOther)
 }
 
@@ -526,9 +543,12 @@ func (c *Controller) ItemCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
+	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
 	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.CreateProjectItem(pid, nullableID(r.FormValue("phase_id")), name,
-			parseFloat(r.FormValue("estimated_cost")), r.FormValue("essential") != "0")
+		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
+			_ = c.store.CreateProjectItem(pid, nullableID(r.FormValue("phase_id")), name,
+				est, r.FormValue("essential") != "0")
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
@@ -598,8 +618,11 @@ func (c *Controller) ItemUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
+	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
 	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.UpdateProjectItem(pathInt(r, "itemID"), name, parseFloat(r.FormValue("estimated_cost")), r.FormValue("essential") != "0")
+		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
+			_ = c.store.UpdateProjectItem(pathInt(r, "itemID"), name, est, r.FormValue("essential") != "0")
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }

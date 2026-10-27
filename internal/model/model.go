@@ -343,6 +343,9 @@ func FinanceWithLoan(plan ProjectPlan, deposit, aprPct float64, termMonths int, 
 // it can be unit-tested directly. monthsLeft rounds partial months up.
 func ComputePlan(itemsTotal, spent, financePct, bufferPct float64, targetDate string, now time.Time) ProjectPlan {
 	target := ProjectTarget(itemsTotal, bufferPct)
+	// Clamp a stored out-of-range percentage (the form now rejects one): over 100
+	// would finance more than the budget, below 0 would save more than it.
+	financePct = min(max(financePct, 0), 100)
 	financed := target * financePct / 100
 	toSave := target - financed
 	if rem := target - spent; rem < toSave {

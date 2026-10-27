@@ -27,6 +27,12 @@ func TestValidateProject(t *testing.T) {
 		{"bad loan start date", model.ProjectInput{Name: "Solar", FinanceMethod: "loan", LoanTermMonths: 60, LoanStartDate: "next march"}, true},
 		{"impossible loan start date", model.ProjectInput{Name: "Solar", FinanceMethod: "loan", LoanTermMonths: 60, LoanStartDate: "2026-02-31"}, true},
 		{"empty start date ok", model.ProjectInput{Name: "Solar", FinanceMethod: "loan", LoanTermMonths: 60, LoanStartDate: ""}, false},
+		{"finance pct 100 ok", model.ProjectInput{Name: "K", FinanceMethod: "save", FinancePct: 100}, false},
+		{"finance pct over 100", model.ProjectInput{Name: "K", FinanceMethod: "save", FinancePct: 150}, true},
+		{"finance pct negative", model.ProjectInput{Name: "K", FinanceMethod: "save", FinancePct: -50}, true},
+		{"negative buffer", model.ProjectInput{Name: "K", FinanceMethod: "save", BufferPct: -10}, true},
+		{"negative deposit", model.ProjectInput{Name: "S", FinanceMethod: "loan", LoanTermMonths: 60, LoanDeposit: -1}, true},
+		{"negative apr", model.ProjectInput{Name: "S", FinanceMethod: "loan", LoanTermMonths: 60, LoanAPR: -2}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,5 +156,47 @@ func TestItemPurchaseKeepsRunningLoanActive(t *testing.T) {
 	}
 	if p, _ := store.GetProject(savePID); p.Status != "completed" {
 		t.Errorf("fully paid save project status = %q want completed", p.Status)
+	}
+}
+
+// The loan calculator can't blank out a loan project's term (which would
+// silently turn it into a target-date saving plan), and negative deposit/APR
+// are floored at 0.
+func TestLoanUpdateKeepsTermOfLoanProject(t *testing.T) {
+	c, store := testController(t)
+	pid, _ := store.CreateProjectInput(model.ProjectInput{Name: "Car", Status: "saving",
+		FinanceMethod: "loan", LoanDeposit: 2000, LoanAPR: 5, LoanTermMonths: 60})
+	r := postForm("/", url.Values{"loan_term_months": {""}, "loan_deposit": {"-500"}, "loan_apr": {"-3"}})
+	r.SetPathValue("id", strconv.FormatInt(pid, 10))
+	c.LoanUpdate(httptest.NewRecorder(), r)
+	p, _ := store.GetProject(pid)
+	if p.LoanTermMonths != 60 || !loanFinanced(p) {
+		t.Errorf("term = %d, loanFinanced = %v; want the stored 60 kept", p.LoanTermMonths, loanFinanced(p))
+	}
+	if p.LoanDeposit != 0 || p.LoanAPR != 0 {
+		t.Errorf("deposit %v apr %v want both floored at 0", p.LoanDeposit, p.LoanAPR)
+	}
+}
+
+// A negative item estimate is ignored on create and update (it would shrink
+// the budget).
+func TestItemNegativeEstimateIgnored(t *testing.T) {
+	c, store := testController(t)
+	pid, _ := store.CreateProjectInput(model.ProjectInput{Name: "Kitchen", Status: "saving", FinanceMethod: "save"})
+	post := func(h http.HandlerFunc, form url.Values, itemID int64) {
+		r := postForm("/", form)
+		r.SetPathValue("id", strconv.FormatInt(pid, 10))
+		r.SetPathValue("itemID", strconv.FormatInt(itemID, 10))
+		h(httptest.NewRecorder(), r)
+	}
+	post(c.ItemCreate, url.Values{"name": {"Oven"}, "estimated_cost": {"-1000"}}, 0)
+	if items, _ := store.ListProjectItems(pid); len(items) != 0 {
+		t.Fatalf("negative estimate created %+v", items)
+	}
+	post(c.ItemCreate, url.Values{"name": {"Oven"}, "estimated_cost": {"1000"}}, 0)
+	items, _ := store.ListProjectItems(pid)
+	post(c.ItemUpdate, url.Values{"name": {"Oven"}, "estimated_cost": {"-1000"}}, items[0].ID)
+	if it, _ := store.GetProjectItem(items[0].ID); it.EstimatedCost != 1000 {
+		t.Errorf("estimate after a negative update = %v want 1000 kept", it.EstimatedCost)
 	}
 }
