@@ -105,6 +105,8 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   no `ensureColumn`); the `idx_pocket_user` index sits in `schema.sql` too.
 - Transactions are editable (`TransactionEdit`/`TransactionUpdate`, `GetTransaction`/
   `UpdateTransaction`) except transfer legs (guarded — edit those by delete+re-add).
+  `DeleteTransaction` on a transfer leg deletes **both** legs (shared `transfer_id`),
+  so a lone leg can never be left moving a balance/NAV.
 - **Categories** are user-managed at `/categories` (`controller/categories.go`):
   add/rename/delete with kind income|expense; delete relies on the transactions FK
   `ON DELETE SET NULL` (leaves rows uncategorized). `CategoryUsage` shows counts.
@@ -125,7 +127,11 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   ragged-tolerant) and renders a column-mapping form with the raw CSV embedded in a
   hidden `<textarea>` (stateless — no temp files); `ImportCommit` re-parses and
   inserts via `CreateTransaction`. Pure tested helpers `parseCSVDate`/`parseCSVAmount`
-  (layouts, decimal-comma, debit/credit, accounting negatives). 5 MB cap. Import
+  (layouts, decimal-comma, debit/credit, accounting negatives, DR/CR, U+2212 and
+  trailing minus). `parseCSVAmount` **refuses rather than guesses**: a grouping
+  separator not followed by exactly 3 digits (`12,50` with comma-decimals off),
+  a separator after the decimal point, stray letters (`1e3`), extra signs — such
+  rows are skipped as "Unparseable amount", never imported as a wrong number. 5 MB cap. Import
   **skips duplicates** by default via `model.TxDedupKey` (date+amount+payee) seeded
   from `Store.AccountTxKeys` (and the in-file set), so re-importing is safe.
 - **Backup** (`/backup`, admin-only, `controller/backup.go`): `Store.Backup` runs
@@ -156,7 +162,10 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   form. `transactions.project_item_id` is added via `ensureColumn`, with a one-time
   backfill that reconnects legacy single-purchase items (via their `transaction_id`
   link) so their derived spend survives. The ledger stays the single source of truth.
-  Projects are household-shared (all members).
+  Projects are household-shared (all members). Paying the last open item
+  auto-completes the project — **except** a loan-financed one whose repayments are
+  still to come (`loanRepaying`), since a completed project leaves the budget and
+  would silently drop its monthly loan payment.
 - **Loan financing** (`projects.finance_method` ∈ `save`|`loan`, plus
   `loan_deposit`/`loan_apr`/`loan_term_months`/`loan_start_date`, all added via
   `ensureColumn`): a
@@ -406,7 +415,9 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
 - Login lockout: 5 failures → 15 minutes. `Store.IncFailedLogin` returns the new
   count (via `RETURNING`) so the lockout gates on the fresh value, and the **same
   lockout guards `/2fa/verify`** (increment on a bad TOTP/recovery code, reset on
-  success) so a stolen password can't brute-force the second factor.
+  success) so a stolen password can't brute-force the second factor. For a TOTP
+  user a correct password does **not** reset the counter (only a passed 2FA does),
+  else re-logging in after every 4 wrong codes would bypass the lockout.
 
 ## Config (env, `LIRA_*`)
 `ADDR` (:8080), `DB` (./lira.db), `SECURE_COOKIES` (true), `MAX_USERS` (2),
