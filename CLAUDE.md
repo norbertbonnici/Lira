@@ -113,7 +113,10 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
 - Account balance = `opening_balance + Σ(transactions.amount)` (income +, expense −).
 - **Transfers** (`Store.CreateTransfer`, `/transfer`): one action writes two
   balanced legs (− from, + to) sharing a `transactions.transfer_id` (added via
-  `ensureColumn`); NAV is net-zero and analytics exclude transfer legs. The
+  `ensureColumn`); NAV is net-zero and analytics exclude transfer legs. Between
+  accounts in **different currencies** `CreateTransfer(from, to, date, sent,
+  received, notes)` books each leg in its own currency — the form's "Amount
+  received" is required then (ignored for same-currency moves). The
   dashboard shows a **bills-due** banner (active operating costs whose
   `NextDueDate` is within 7 days), via `Controller.billsDue`.
 - **Insights** (`/insights`, `controller/insights.go`): `Store.MonthlyTotals`
@@ -135,8 +138,12 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   rows are skipped as "Unparseable amount", never imported as a wrong number. 5 MB cap,
   enforced: `ImportPreview` parses the upload before `checkCSRF` and refuses a
   bigger file outright (no silent truncation). Import
-  **skips duplicates** by default via `model.TxDedupKey` (date+amount+payee) seeded
-  from `Store.AccountTxKeys` (and the in-file set), so re-importing is safe.
+  **skips duplicates** by default via `model.TxDedupKey` (date+amount+payee):
+  `Store.AccountTxKeys` **counts** copies per key and the import skips only as
+  many rows as the account already holds — genuine repeats (two identical coffees)
+  import, re-importing the same file adds nothing. Exports pass every cell
+  through `csvSafe` (a leading `= + - @`/tab/CR gets an apostrophe so Excel won't
+  run it as a formula; plain numbers like `-12.50` stay numeric).
 - **Backup** (`/backup`, admin-only, `controller/backup.go`): `Store.Backup` runs
   SQLite `VACUUM INTO` a temp file, streamed as a `.db` download. Settings page button.
 - NAV = `Σ(non-spending account balances) + Σ(holding.quantity × holding.price)`
@@ -172,7 +179,13 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   form. `transactions.project_item_id` is added via `ensureColumn`, with a one-time
   backfill that reconnects legacy single-purchase items (via their `transaction_id`
   link) so their derived spend survives. The ledger stays the single source of truth.
-  Projects are household-shared (all members). Paying the last open item
+  Projects are household-shared (all members). Every `{itemID}`/`{phaseID}`
+  handler resolves the object via `projectItem`/`projectPhase` (and `ItemCreate`'s
+  phase via `phaseOfProject`), which require it to belong to the `{id}` project in
+  the URL — GETs 404, POSTs change nothing otherwise. `validateProject` also
+  rejects finance % outside 0–100, a negative buffer, deposit or APR
+  (`ComputePlan` clamps a stored out-of-range %); a negative item estimate is
+  ignored like a blank name. Paying the last open item
   auto-completes the project — **except** a loan-financed one whose repayments are
   still to come (`loanRepaying`), since a completed project leaves the budget and
   would silently drop its monthly loan payment.
@@ -242,7 +255,9 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   transactions** — it's a planning commitment against the monthly budget. The detail
   page also keeps the standalone loan **calculator** panel (`LoanUpdate`,
   `POST /projects/{id}/loan`, `UpdateProjectLoan`) which tweaks the loan numbers
-  without changing the method (shows an "active" tag when loan is the chosen method).
+  without changing the method (shows an "active" tag when loan is the chosen method);
+  it keeps a loan project's stored term when the field is blank/0 (else the
+  project would silently turn into a saving plan) and floors deposit/APR at 0.
 - **Phases** (`project_phases` + `project_items.phase_id`): a project can be split
   into dated milestones; each item is assigned to a phase (NULL `phase_id` = the
   implicit "General" group, dated by the project's own `target_date`). Each phase
@@ -265,7 +280,10 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   prices each `LIRA_FETCH_INTERVAL_HOURS`, then snapshots. `ComputeNAV` converts
   every account/holding by its currency's `rate_to_eur` (missing → 1.0), so NAV is
   EUR. Failed price lookups preserve the existing price (manual prices survive).
-  `RefreshNow`/`/refresh` is the on-demand button. `fx_rates` is a new table (no
+  `RefreshNow`/`/refresh` is the on-demand button. Both go through
+  `market.Refresh`, which runs the FX and price updates independently (one
+  failing doesn't skip the other) and joins their errors; a failed manual refresh
+  redirects to `/holdings?refresh=failed`, which shows a note. `fx_rates` is a new table (no
   `ensureColumn` needed). **Auto-fetch is capped to once per UTC day** via the
   `app_meta` KV table (`Store.AutoFetchedToday`/`MarkAutoFetched`, key
   `market_last_fetch`, marked on success) so restarts don't burn API credits; the
@@ -319,6 +337,10 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   SVG** stacked-area chart via the `view` funcMap func `chart` (operates on a plain
   `view.ChartSeries` — keeps `view` free of `model`). No JS: inline SVG is markup,
   allowed by the CSP. New `nav_snapshots` columns added via `ensureColumn`.
+  Chart y-ranges cover every drawn series and 0 (negative cash, a forecast line
+  dipping below zero), so nothing renders off the canvas; `eur` shows `€—` for
+  NaN/Inf instead of panicking the template, and `eur`/`signClass` treat
+  anything under half a cent as zero (no "-€0.00").
 - **Dashboard visuals** (`controller/dashboard.go` `dashboardExtras`): the hero
   shows net worth + month-over-month change (current NAV vs the last snapshot before
   this month) + an **asset-allocation donut** (`view` funcMap `donut` over
@@ -405,12 +427,14 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
   per-user home every member can reach — so non-admin members mint their own tokens
   there (Settings is admin-only). A hidden `from` field (`settings`|`pocket`) tells
   `TokenCreate`/`TokenRevoke` which page to re-render (with the one-time secret) /
-  redirect to.
+  redirect to — a non-admin always gets Pocket, whatever `from` says.
 - Endpoints (all `c.APIAuth(...)` in `main.go`): `GET /me`, `/summary`, `/accounts`,
   `/transactions`, `/holdings`, `/projects`, `/costs`, `/pocket`; writes `POST
   /transactions`, `/accounts`, `/holdings`, `/pocket` and `DELETE /transactions/{id}`,
   `/pocket/{id}`. Handlers emit clean JSON via map DTOs (avoids `sql.Null*`
   marshaling); helpers `writeJSON`/`apiError`/`decodeJSON` (1 MB body cap).
+  Write dates must be `YYYY-MM-DD` (`isDate`, else 422) — reports group and
+  range-filter on that text form.
 - Deferred (easy to add): edits/`PUT`, projects/costs writes, transfers, pagination.
   Served over TLS (Cloudflare/Caddy) — token + HTTPS is the whole model.
 
@@ -431,6 +455,9 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
 - Passwords: SHA-256 pre-hash → bcrypt cost 12 (avoids the 72-byte limit).
 - Sessions: server-side (`sessions` table), httpOnly + SameSite=Lax cookie
   (`lira_session`), Secure per `LIRA_SECURE_COOKIES`.
+- Login refusals (unknown user, wrong password, **locked**) all show one message
+  and pay the same bcrypt cost (`dummyHash`), so the lockout can't confirm that a
+  username exists.
 - Login lockout: 5 failures → 15 minutes. Every guess first **claims** an attempt
   with `Store.ClaimLoginAttempt` — one conditional `UPDATE … RETURNING` that
   refuses while locked, counts the guess as a failure up front, and sets the
