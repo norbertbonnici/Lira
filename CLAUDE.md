@@ -118,7 +118,8 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   `NextDueDate` is within 7 days), via `Controller.billsDue`.
 - **Insights** (`/insights`, `controller/insights.go`): `Store.MonthlyTotals`
   (income/expense per `YYYY-MM`) and `Store.SpendByCategory(from,to)` aggregate
-  transactions **excluding transfer legs** (`transfer_id IS NULL`); the page shows
+  transactions **in EUR** (by account currency, via `Store.eurRate`, like NAV)
+  **excluding transfer legs** (`transfer_id IS NULL`); the page shows
   this-month income/spend/net/savings-rate, a category breakdown (CSS bars), and a
   12-month trend table.
 - **CSV import/export** (`controller/csv.go`): export handlers (transactions /
@@ -131,7 +132,9 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   trailing minus). `parseCSVAmount` **refuses rather than guesses**: a grouping
   separator not followed by exactly 3 digits (`12,50` with comma-decimals off),
   a separator after the decimal point, stray letters (`1e3`), extra signs — such
-  rows are skipped as "Unparseable amount", never imported as a wrong number. 5 MB cap. Import
+  rows are skipped as "Unparseable amount", never imported as a wrong number. 5 MB cap,
+  enforced: `ImportPreview` parses the upload before `checkCSRF` and refuses a
+  bigger file outright (no silent truncation). Import
   **skips duplicates** by default via `model.TxDedupKey` (date+amount+payee) seeded
   from `Store.AccountTxKeys` (and the in-file set), so re-importing is safe.
 - **Backup** (`/backup`, admin-only, `controller/backup.go`): `Store.Backup` runs
@@ -144,6 +147,9 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   `projects.target_amount` column is vestigial — target is computed). `finance_pct`
   is a *planning* input only (creates no transactions): it splits the budget into
   financed-from-savings (drawn from NAV) and to-save (÷ months to `target_date`).
+  Payments draw the **financed share first** (that money exists today): `ToSave`
+  is what is still left to save, `min(Target − Financed, max(Remaining, 0))`, so
+  the monthly figure and an overdue phase's "due now" shrink as it's paid.
   The savings math lives in the pure, unit-tested `model.ComputePlan`. **Line items
   accept partial payments** (a deposit now, the balance later — no need to split into
   two items): `Store.PayItem(itemID, account, date, amount, categoryID, final)`
@@ -158,7 +164,11 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   column in `projectItemCols`; the General group in `projectGroups` sums it. So a
   deposit immediately draws down remaining/cash/burn-down — not just completed items.
   `actual_cost` holds the final total once done; `transaction_id` points at the most
-  recent payment; `Store.ListItemPayments` lists an item's payment history for the pay
+  recent payment. Because those two (and `purchased`) ARE stored, editing or
+  deleting a payment row re-derives them in the same transaction
+  (`changeTransaction` → `syncItemStatus`: reopen when payments drop below the
+  closing total, follow the total while covered, close when an edit reaches the
+  estimate); a payment on an already-closed item keeps it closed; `Store.ListItemPayments` lists an item's payment history for the pay
   form. `transactions.project_item_id` is added via `ensureColumn`, with a one-time
   backfill that reconnects legacy single-purchase items (via their `transaction_id`
   link) so their derived spend survives. The ledger stays the single source of truth.
@@ -199,8 +209,9 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   planned/paid/remaining with `part-paid`/`paid` tags and the payment history,
   and keeps a method-switched project's history visible with payments disabled.
   The controller helper `stillToDraw`
-  (Financed − DepositPaid, clamped, applied regardless of the CURRENT finance
-  method so switching back to "save" can't double-count) keeps
+  (loan: Financed − DepositPaid; save: Financed − the aggregate Spent, which
+  includes item payments and any deposit paid before a switch back from loan —
+  clamped ≥ 0, so paid money never counts twice) keeps
   `AfterNAV`/`AfterCash`/`ShortCash` and the projects-list "committed" figure
   honest. **A paid deposit also counts toward the project's displayed
   Spent/Remaining** — `projectGroups` adds `DepositPaid` into the aggregate plan
@@ -208,8 +219,9 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   and plan page all draw down when the deposit is paid; per-phase "Spent" and the
   API's `spent` stay item-derived (the deposit is project-level money, not item
   spend); the burn-down includes the **unpaid** deposit remainder as a lump at
-  `loan_start_date` (else `target_date`) — skipped for a loan whose start month
-  has already passed ONLY when no payments are recorded (that implies the deposit
+  `loan_start_date` (else `target_date`) — skipped (`depositPaidPreLira`) for a
+  loan whose start month is already BEFORE the current one (a deposit due this
+  month stays a lump) ONLY when no payments are recorded (that implies the deposit
   left pre-Lira; recorded increments prove Lira is tracking it, so the remainder
   stays as a due-now lump). `DepositPay`
   handler at `POST /projects/{id}/deposit`; the pay form lives in the detail
@@ -412,19 +424,29 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
 - Passwords: SHA-256 pre-hash → bcrypt cost 12 (avoids the 72-byte limit).
 - Sessions: server-side (`sessions` table), httpOnly + SameSite=Lax cookie
   (`lira_session`), Secure per `LIRA_SECURE_COOKIES`.
-- Login lockout: 5 failures → 15 minutes. `Store.IncFailedLogin` returns the new
-  count (via `RETURNING`) so the lockout gates on the fresh value, and the **same
-  lockout guards `/2fa/verify`** (increment on a bad TOTP/recovery code, reset on
-  success) so a stolen password can't brute-force the second factor. For a TOTP
-  user a correct password does **not** reset the counter (only a passed 2FA does),
-  else re-logging in after every 4 wrong codes would bypass the lockout.
+- Login lockout: 5 failures → 15 minutes. Every guess first **claims** an attempt
+  with `Store.ClaimLoginAttempt` — one conditional `UPDATE … RETURNING` that
+  refuses while locked, counts the guess as a failure up front, and sets the
+  lockout on the claim that reaches the limit — so parallel requests can't all
+  pass a stale "not locked" read; a correct guess undoes it. The **same lockout
+  guards `/2fa/verify`** (reset on success) so a stolen password can't
+  brute-force the second factor. For a TOTP user a correct password only gives
+  back its own claim (`RefundLoginAttempt`), never resets the counter (only a
+  passed 2FA does), else re-logging in after every 4 wrong codes would bypass it.
+- **One-time things are consumed atomically** — act only when the conditional
+  `UPDATE` changed a row: TOTP steps (`ConsumeTOTPStep`, `WHERE totp_last_step<?`),
+  recovery codes (`UseRecoveryCode`, `WHERE used=0`), invites (`AcceptInvite`
+  claims the invite and inserts the user in one transaction), and the user cap
+  (`CreateUserCapped`, `INSERT … SELECT … WHERE COUNT(*) < cap`; `/register`
+  uses cap 1). Pinned by the parallel tests in `controller/auth_lockout_test.go`.
 
 ## Config (env, `LIRA_*`)
 `ADDR` (:8080), `DB` (./lira.db), `SECURE_COOKIES` (true), `MAX_USERS` (2),
 `SESSION_TTL_HOURS` (168), `ISSUER` (Lira), `BASE_URL` (empty → derive from
 request; set to the public origin for correct invite links behind a proxy),
 `MARKET_API_KEY` (empty → price/FX fetch off), `FETCH_INTERVAL_HOURS` (24).
-See `config.example.env`.
+See `config.example.env`. Request bodies are capped in `main.go` `limitBody`
+(1 MB; `controller.ImportBodyLimit` on `/transactions/import/*`).
 
 ## Deploy
 Static binary + `deploy/lira.service` (hardened systemd unit). Plain HTTP behind
