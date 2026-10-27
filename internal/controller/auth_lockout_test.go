@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"lira/internal/model"
 )
@@ -85,5 +88,95 @@ func TestPasswordLoginResetsCounterWithoutTwoFactor(t *testing.T) {
 	c.Login(httptest.NewRecorder(), postForm("/login", url.Values{"username": {"bob"}, "password": {"pw"}}))
 	if u, _ := store.GetUserByID(uid); u.FailedLogins != 0 {
 		t.Errorf("failed_logins = %d want 0 after a good password (no 2FA)", u.FailedLogins)
+	}
+}
+
+// totpUser creates a user with TOTP enabled and returns its id and secret.
+func totpUser(t *testing.T, store *model.Store, name string) (int64, string) {
+	t.Helper()
+	hash, _ := hashPassword("pw-" + name)
+	uid, err := store.CreateUser(name, hash, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := generateTOTPSecret()
+	_ = store.SetTOTPSecret(uid, secret)
+	_ = store.EnableTOTP(uid)
+	return uid, secret
+}
+
+// runParallel releases n copies of fn at once and waits for them all.
+func runParallel(n int, fn func(i int)) {
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			fn(i)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+}
+
+// A burst of parallel wrong 2FA codes gets exactly maxFailed evaluations; the
+// rest are refused by the lockout instead of each being checked.
+func TestParallelTwoFactorGuessesHitLockout(t *testing.T) {
+	c, store := testController(t)
+	uid, _ := totpUser(t, store, "alice")
+	sess, _ := store.CreateSession(uid, false, time.Hour)
+	runParallel(30, func(int) {
+		user, _ := store.GetUserByID(uid)
+		r := withUser(postForm("/2fa/verify", url.Values{"code": {"000000x"}}), sess, user)
+		c.TwoFAVerify(httptest.NewRecorder(), r)
+	})
+	if u, _ := store.GetUserByID(uid); u.FailedLogins != maxFailed || !isLocked(u) {
+		t.Errorf("after 30 parallel guesses: failed_logins=%d locked=%v want %d and locked",
+			u.FailedLogins, isLocked(u), maxFailed)
+	}
+}
+
+// One TOTP code submitted from two half-logged-in sessions at once passes once.
+func TestParallelTOTPReplayPassesOnce(t *testing.T) {
+	c, store := testController(t)
+	uid, secret := totpUser(t, store, "bob")
+	key, _ := b32.DecodeString(secret)
+	code := hotp(key, uint64(time.Now().Unix()/30))
+	sessions := make([]*model.Session, 4)
+	for i := range sessions {
+		sessions[i], _ = store.CreateSession(uid, false, time.Hour)
+	}
+	runParallel(len(sessions), func(i int) {
+		user, _ := store.GetUserByID(uid)
+		r := withUser(postForm("/2fa/verify", url.Values{"code": {code}}), sessions[i], user)
+		c.TwoFAVerify(httptest.NewRecorder(), r)
+	})
+	passed := 0
+	for _, s := range sessions {
+		if got, _ := store.GetSession(s.Token); got.MFAPassed {
+			passed++
+		}
+	}
+	if passed != 1 {
+		t.Errorf("same TOTP code passed 2FA in %d sessions want 1", passed)
+	}
+}
+
+// One invite link posted several times at once creates one account.
+func TestParallelInviteAcceptCreatesOneUser(t *testing.T) {
+	c, store := testController(t)
+	c.cfg.MaxUsers = 10
+	admin, _ := store.CreateUser("admin", "h", "admin")
+	_ = store.CreateInvite(hashToken("tok-1"), "x", admin, time.Now().Add(time.Hour))
+	runParallel(4, func(i int) {
+		r := postForm("/invite/tok-1", url.Values{"username": {fmt.Sprintf("m%d", i)},
+			"password": {"longenough"}, "confirm": {"longenough"}})
+		r.SetPathValue("token", "tok-1")
+		c.InviteAccept(httptest.NewRecorder(), r)
+	})
+	if n, _ := store.CountUsers(); n != 2 {
+		t.Errorf("users after 4 parallel uses of one invite = %d want 2", n)
 	}
 }

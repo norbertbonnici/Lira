@@ -2,6 +2,8 @@ package model
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -1169,7 +1171,7 @@ func TestInviteLifecycle(t *testing.T) {
 	}
 
 	// Single-use: once consumed it no longer validates.
-	if err := s.MarkInviteUsed(iv.ID); err != nil {
+	if _, err := s.AcceptInvite(iv.ID, "member1", "h", 5); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetValidInvite("hash-good"); err == nil {
@@ -1188,26 +1190,161 @@ func TestInviteLifecycle(t *testing.T) {
 	}
 }
 
-func TestIncFailedLoginReturnsCount(t *testing.T) {
+// parallel runs fn n times concurrently (released together) and returns how
+// many calls reported true.
+func parallel(t *testing.T, n int, fn func(i int) (bool, error)) int {
+	t.Helper()
+	type res struct {
+		ok  bool
+		err error
+	}
+	out := make(chan res, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			<-start
+			ok, err := fn(i)
+			out <- res{ok, err}
+		}(i)
+	}
+	close(start)
+	wins := 0
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("call failed: %v", r.err)
+		}
+		if r.ok {
+			wins++
+		}
+	}
+	return wins
+}
+
+// Only maxFailed attempts can be claimed, however many arrive at once; the
+// claim that reaches the limit sets the lockout; an expired lockout restarts
+// the count; a refund lifts a lockout its own claim set.
+func TestClaimLoginAttempt(t *testing.T) {
 	s := testStore(t)
-	uid, err := s.CreateUser("u", "h", "member")
-	if err != nil {
+	uid, _ := s.CreateUser("u", "h", "member")
+	won := parallel(t, 40, func(int) (bool, error) { return s.ClaimLoginAttempt(uid, 5, time.Minute) })
+	if won != 5 {
+		t.Errorf("parallel claims granted = %d want 5", won)
+	}
+	u, _ := s.GetUserByID(uid)
+	if u.FailedLogins != 5 || u.LockedUntil == "" {
+		t.Errorf("after the limit: failed=%d locked_until=%q want 5 and a lockout", u.FailedLogins, u.LockedUntil)
+	}
+
+	// Expired lockout: the next claim succeeds and restarts the count at 1.
+	if _, err := s.db.Exec(`UPDATE users SET locked_until=? WHERE id=?`,
+		time.Now().Add(-time.Second).UTC().Format(time.RFC3339), uid); err != nil {
 		t.Fatal(err)
 	}
-	for want := 1; want <= 3; want++ {
-		got, err := s.IncFailedLogin(uid)
-		if err != nil {
-			t.Fatalf("IncFailedLogin: %v", err)
-		}
-		if got != want {
-			t.Errorf("IncFailedLogin #%d returned %d, want %d", want, got, want)
-		}
+	if ok, _ := s.ClaimLoginAttempt(uid, 5, time.Minute); !ok {
+		t.Fatal("claim refused after the lockout expired")
+	}
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 1 || u.LockedUntil != "" {
+		t.Errorf("after expiry: failed=%d locked_until=%q want 1 and unlocked", u.FailedLogins, u.LockedUntil)
+	}
+
+	// Count at 4, a correct-password claim takes it to 5 (locking); its refund
+	// returns to 4 and lifts that lock.
+	_ = s.ResetFailedLogin(uid)
+	for i := 0; i < 5; i++ {
+		_, _ = s.ClaimLoginAttempt(uid, 5, time.Minute)
+	}
+	_ = s.RefundLoginAttempt(uid, 5)
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 4 || u.LockedUntil != "" {
+		t.Errorf("after refund: failed=%d locked_until=%q want 4 and unlocked", u.FailedLogins, u.LockedUntil)
 	}
 	if err := s.ResetFailedLogin(uid); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.IncFailedLogin(uid); got != 1 {
-		t.Errorf("after reset, IncFailedLogin returned %d, want 1", got)
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 0 || u.LockedUntil != "" {
+		t.Errorf("after reset: %+v", u)
+	}
+}
+
+// One TOTP step / one recovery code can be consumed exactly once, even by
+// simultaneous requests, and the step never moves backwards.
+func TestOneTimeCodesConsumedOnce(t *testing.T) {
+	s := testStore(t)
+	uid, _ := s.CreateUser("u", "h", "member")
+	if won := parallel(t, 10, func(int) (bool, error) { return s.ConsumeTOTPStep(uid, 1000) }); won != 1 {
+		t.Errorf("same TOTP step consumed %d times want 1", won)
+	}
+	if ok, _ := s.ConsumeTOTPStep(uid, 999); ok {
+		t.Error("an older step was accepted after a newer one")
+	}
+	if ok, _ := s.ConsumeTOTPStep(uid, 1001); !ok {
+		t.Error("the next step was refused")
+	}
+
+	if err := s.StoreRecoveryCodes(uid, []string{"rc-hash"}); err != nil {
+		t.Fatal(err)
+	}
+	rcs, _ := s.ListUnusedRecoveryCodes(uid)
+	if won := parallel(t, 10, func(int) (bool, error) { return s.UseRecoveryCode(rcs[0].ID) }); won != 1 {
+		t.Errorf("recovery code used %d times want 1", won)
+	}
+}
+
+// One invite link creates one account however many times it is submitted at
+// once, and never past the user cap; a rejected username leaves it usable.
+func TestAcceptInviteOnceAndCapped(t *testing.T) {
+	s := testStore(t)
+	admin, _ := s.CreateUser("admin", "h", "admin")
+	_ = s.CreateInvite("one", "x", admin, time.Now().Add(time.Hour))
+	iv, _ := s.GetValidInvite("one")
+	won := parallel(t, 5, func(i int) (bool, error) {
+		_, err := s.AcceptInvite(iv.ID, fmt.Sprintf("m%d", i), "h", 10)
+		if errors.Is(err, ErrInviteUsed) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if n, _ := s.CountUsers(); won != 1 || n != 2 {
+		t.Errorf("one invite x5 concurrent: %d accepted, %d users; want 1 and 2", won, n)
+	}
+
+	// Taken username: rolled back, invite still valid.
+	_ = s.CreateInvite("two", "y", admin, time.Now().Add(time.Hour))
+	iv2, _ := s.GetValidInvite("two")
+	if _, err := s.AcceptInvite(iv2.ID, "admin", "h", 10); err == nil {
+		t.Fatal("duplicate username accepted")
+	}
+	if _, err := s.GetValidInvite("two"); err != nil {
+		t.Errorf("invite consumed by a failed sign-up: %v", err)
+	}
+	// Cap: 2 users exist, cap 2 → refused, invite kept.
+	if _, err := s.AcceptInvite(iv2.ID, "m9", "h", 2); !errors.Is(err, ErrUserLimit) {
+		t.Errorf("over the cap: err %v want ErrUserLimit", err)
+	}
+	if _, err := s.GetValidInvite("two"); err != nil {
+		t.Errorf("invite consumed by a capped sign-up: %v", err)
+	}
+	// Expired invites can't be claimed.
+	_ = s.CreateInvite("old", "z", admin, time.Now().Add(-time.Hour))
+	var oldID int64
+	_ = s.db.QueryRow(`SELECT id FROM invites WHERE token_hash='old'`).Scan(&oldID)
+	if _, err := s.AcceptInvite(oldID, "m8", "h", 10); !errors.Is(err, ErrInviteUsed) {
+		t.Errorf("expired invite: err %v want ErrInviteUsed", err)
+	}
+}
+
+// Concurrent bootstrap registrations create a single admin.
+func TestCreateUserCappedConcurrent(t *testing.T) {
+	s := testStore(t)
+	won := parallel(t, 5, func(i int) (bool, error) {
+		_, err := s.CreateUserCapped(fmt.Sprintf("a%d", i), "h", "admin", 1)
+		if errors.Is(err, ErrUserLimit) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if n, _ := s.CountUsers(); won != 1 || n != 1 {
+		t.Errorf("concurrent first sign-ups: %d created, %d users; want 1", won, n)
 	}
 }
 

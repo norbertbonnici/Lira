@@ -743,6 +743,40 @@ func (s *Store) CountUsers() (int, error) {
 	return n, err
 }
 
+// ErrUserLimit is returned when creating an account would exceed the cap.
+var ErrUserLimit = errors.New("user limit reached")
+
+// CreateUserCapped inserts a user only while fewer than maxUsers exist, checked
+// in the same statement so concurrent sign-ups can't both pass a stale count.
+// Returns ErrUserLimit when full (a duplicate username is a plain error).
+func (s *Store) CreateUserCapped(username, passwordHash, role string, maxUsers int) (int64, error) {
+	return createUserCapped(s.db, username, passwordHash, role, maxUsers)
+}
+
+// execer is satisfied by *sql.DB and *sql.Tx.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func createUserCapped(db execer, username, passwordHash, role string, maxUsers int) (int64, error) {
+	if role == "" {
+		role = "member"
+	}
+	res, err := db.Exec(
+		`INSERT INTO users(username, password_hash, role, created_at)
+		 SELECT ?,?,?,? WHERE (SELECT COUNT(*) FROM users) < ?`,
+		username, passwordHash, role, nowRFC(), maxUsers)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 0 {
+		return 0, ErrUserLimit
+	}
+	return res.LastInsertId()
+}
+
 func (s *Store) CreateUser(username, passwordHash, role string) (int64, error) {
 	if role == "" {
 		role = "member"
@@ -814,25 +848,59 @@ func (s *Store) SetTOTPLastStep(userID, step int64) error {
 	return err
 }
 
-// IncFailedLogin atomically bumps the user's failed-login counter and returns
-// the new value, so callers gate the lockout on the fresh count (not a stale
-// read taken at the start of the request).
-func (s *Store) IncFailedLogin(userID int64) (int, error) {
+// ConsumeTOTPStep records a TOTP code's time step as used, but only if it is
+// newer than the last one used — in one statement, so the same code submitted
+// twice at once passes at most once (and the step never moves backwards).
+// Returns whether this call consumed it.
+func (s *Store) ConsumeTOTPStep(userID, step int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE users SET totp_last_step=? WHERE id=? AND totp_last_step<?`, step, userID, step)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ClaimLoginAttempt atomically reserves one guess (password, TOTP or recovery
+// code) against the user's lockout budget BEFORE the guess is checked, so
+// parallel requests can't all slip past a stale "not locked" read. It returns
+// false when the account is locked. The claim counts as a failure up front:
+// the claim that reaches maxFailed also sets the lockout, and a correct guess
+// undoes its claim with ResetFailedLogin or RefundLoginAttempt. Once a lockout
+// has expired the count restarts.
+func (s *Store) ClaimLoginAttempt(userID int64, maxFailed int, window time.Duration) (bool, error) {
+	now := time.Now().UTC()
 	var n int
-	err := s.db.QueryRow(
-		`UPDATE users SET failed_logins=failed_logins+1 WHERE id=? RETURNING failed_logins`,
-		userID).Scan(&n)
-	return n, err
+	// SET expressions all see the pre-update row; the WHERE only admits an
+	// unlocked or expired-lock row, so a set locked_until here means "expired".
+	err := s.db.QueryRow(`
+		UPDATE users SET
+		  failed_logins = CASE WHEN locked_until<>'' THEN 1 ELSE failed_logins+1 END,
+		  locked_until  = CASE WHEN (CASE WHEN locked_until<>'' THEN 1 ELSE failed_logins+1 END) >= ?
+		                       THEN ? ELSE '' END
+		WHERE id=? AND (locked_until='' OR locked_until<=?)
+		RETURNING failed_logins`,
+		maxFailed, now.Add(window).Format(time.RFC3339), userID, now.Format(time.RFC3339)).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// RefundLoginAttempt gives back one claimed attempt after a correct password
+// for a user who still has to pass 2FA: the count drops by one (so earlier 2FA
+// failures still count) and a lockout this claim set is lifted.
+func (s *Store) RefundLoginAttempt(userID int64, maxFailed int) error {
+	_, err := s.db.Exec(`
+		UPDATE users SET
+		  failed_logins = MAX(failed_logins-1, 0),
+		  locked_until  = CASE WHEN failed_logins-1 < ? THEN '' ELSE locked_until END
+		WHERE id=?`, maxFailed, userID)
+	return err
 }
 
 func (s *Store) ResetFailedLogin(userID int64) error {
 	_, err := s.db.Exec(`UPDATE users SET failed_logins=0, locked_until='' WHERE id=?`, userID)
-	return err
-}
-
-func (s *Store) SetLockout(userID int64, until time.Time) error {
-	_, err := s.db.Exec(`UPDATE users SET locked_until=? WHERE id=?`,
-		until.UTC().Format(time.RFC3339), userID)
 	return err
 }
 
@@ -981,9 +1049,36 @@ func (s *Store) GetValidInvite(tokenHash string) (*Invite, error) {
 	return &iv, nil
 }
 
-func (s *Store) MarkInviteUsed(id int64) error {
-	_, err := s.db.Exec(`UPDATE invites SET used_at=? WHERE id=?`, nowRFC(), id)
-	return err
+// ErrInviteUsed is returned when an invite was already consumed or has expired.
+var ErrInviteUsed = errors.New("invite already used or expired")
+
+// AcceptInvite consumes an invite and creates its member account in one
+// transaction: the invite is claimed only if still unused and unexpired, and
+// the user is inserted only under the maxUsers cap. Either both happen or
+// neither, so concurrent submissions of one link create at most one account
+// (and a rejected username leaves the invite usable). Returns ErrInviteUsed,
+// ErrUserLimit, or a plain error (e.g. a taken username).
+func (s *Store) AcceptInvite(inviteID int64, username, passwordHash string, maxUsers int) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	now := nowRFC()
+	res, err := tx.Exec(`UPDATE invites SET used_at=? WHERE id=? AND used_at='' AND expires_at>?`, now, inviteID, now)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 0 {
+		return 0, ErrInviteUsed
+	}
+	uid, err := createUserCapped(tx, username, passwordHash, "member", maxUsers)
+	if err != nil {
+		return 0, err
+	}
+	return uid, tx.Commit()
 }
 
 // ListPendingInvites returns unused, unexpired invites (newest first).
@@ -1047,9 +1142,15 @@ func (s *Store) ListUnusedRecoveryCodes(userID int64) ([]RecoveryCode, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) MarkRecoveryCodeUsed(id int64) error {
-	_, err := s.db.Exec(`UPDATE recovery_codes SET used=1 WHERE id=?`, id)
-	return err
+// UseRecoveryCode marks a recovery code used, only if it still is unused, and
+// reports whether this call did — so one code can't pass twice concurrently.
+func (s *Store) UseRecoveryCode(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE recovery_codes SET used=1 WHERE id=? AND used=0`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // Sessions

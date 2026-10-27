@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -70,7 +71,13 @@ func (c *Controller) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The only public registration is the first account, which becomes admin.
-	uid, err := c.store.CreateUser(username, hash, "admin")
+	// The cap of 1 is checked in the INSERT itself, so two racing sign-ups on a
+	// fresh install can't both become admin.
+	uid, err := c.store.CreateUserCapped(username, hash, "admin", 1)
+	if errors.Is(err, model.ErrUserLimit) {
+		c.render(w, r, "auth_register.html", map[string]any{"Open": false})
+		return
+	}
 	if err != nil {
 		fail("That username is taken.")
 		return
@@ -139,13 +146,16 @@ func (c *Controller) InviteAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	uid, err := c.store.CreateUser(username, hash, "member")
-	if err != nil {
-		fail("That username is taken.")
+	// Claim the invite and create the account together (the earlier checks are
+	// only for a friendly early answer): concurrent posts of one link create at
+	// most one account, and never past MaxUsers.
+	uid, err := c.store.AcceptInvite(iv.ID, username, hash, c.cfg.MaxUsers)
+	if errors.Is(err, model.ErrInviteUsed) || errors.Is(err, model.ErrUserLimit) {
+		c.render(w, r, "invite.html", map[string]any{"Invalid": true})
 		return
 	}
-	if err := c.store.MarkInviteUsed(iv.ID); err != nil {
-		http.Error(w, "database error", http.StatusInternalServerError)
+	if err != nil {
+		fail("That username is taken.")
 		return
 	}
 	sess, err := c.store.CreateSession(uid, true, c.cfg.SessionTTL)
@@ -183,31 +193,30 @@ func (c *Controller) Login(w http.ResponseWriter, r *http.Request) {
 		invalid()
 		return
 	}
-	if isLocked(user) {
+	// Reserve this guess against the lockout budget before checking it, so
+	// parallel requests can't all pass a stale "not locked" read (the claim
+	// counts as a failure and sets the lockout when it hits the limit).
+	if ok, err := c.store.ClaimLoginAttempt(user.ID, maxFailed, lockoutWindow); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	} else if !ok {
 		c.render(w, r, "auth_login.html", map[string]any{
 			"Error":    "Account temporarily locked after too many attempts. Try again shortly.",
 			"Username": username, "CanRegister": c.registrationOpen()})
 		return
 	}
-	// A previous lockout has elapsed: clear the stale counter so a single later
-	// failure doesn't immediately re-lock the account.
-	if user.LockedUntil != "" {
-		_ = c.store.ResetFailedLogin(user.ID)
-		user.FailedLogins = 0
-	}
 	if !checkPassword(user.PasswordHash, pw) {
-		n, _ := c.store.IncFailedLogin(user.ID)
-		if n >= maxFailed {
-			_ = c.store.SetLockout(user.ID, time.Now().Add(lockoutWindow))
-		}
 		invalid()
 		return
 	}
 	// The password alone only clears the shared lockout counter when there is no
-	// second factor to pass. With TOTP on, TwoFAVerify resets it after a good
-	// code; resetting here would let a password holder re-login after every 4
-	// wrong codes and brute-force the TOTP without ever hitting the lockout.
-	if !user.TOTPEnabled {
+	// second factor to pass. With TOTP on, it just gives back its own claim and
+	// TwoFAVerify resets the counter after a good code; resetting here would let
+	// a password holder re-login after every 4 wrong codes and brute-force the
+	// TOTP without ever hitting the lockout.
+	if user.TOTPEnabled {
+		_ = c.store.RefundLoginAttempt(user.ID, maxFailed)
+	} else {
 		_ = c.store.ResetFailedLogin(user.ID)
 	}
 
@@ -351,32 +360,33 @@ func (c *Controller) TwoFAVerify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
+	// Reserve the guess first (see Login): parallel guesses can't outrun the lockout.
+	if ok, err := c.store.ClaimLoginAttempt(user.ID, maxFailed, lockoutWindow); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	} else if !ok {
+		c.render(w, r, "auth_2fa_verify.html", map[string]any{
+			"Error": "Too many attempts. Try again shortly."})
+		return
+	}
 	code := strings.TrimSpace(r.FormValue("code"))
 	step, ok := validateTOTP(user.TOTPSecret, code, time.Now().Unix())
 	if ok {
-		// Reject a code already consumed in this (or a later) step — replay.
-		if step <= user.TOTPLastStep {
-			ok = false
-		} else {
-			_ = c.store.SetTOTPLastStep(user.ID, step)
-		}
+		// Consume the step atomically: a code already used in this (or a later)
+		// step is a replay, even when both copies arrive at once.
+		ok, _ = c.store.ConsumeTOTPStep(user.ID, step)
 	}
 	if !ok {
-		// Fall back to a single-use recovery code.
+		// Fall back to a single-use recovery code (also consumed atomically).
 		rcs, _ := c.store.ListUnusedRecoveryCodes(user.ID)
 		for _, rc := range rcs {
 			if checkPassword(rc.Hash, code) {
-				_ = c.store.MarkRecoveryCodeUsed(rc.ID)
-				ok = true
+				ok, _ = c.store.UseRecoveryCode(rc.ID)
 				break
 			}
 		}
 	}
-	if !ok {
-		n, _ := c.store.IncFailedLogin(user.ID)
-		if n >= maxFailed {
-			_ = c.store.SetLockout(user.ID, time.Now().Add(lockoutWindow))
-		}
+	if !ok { // the claim already counted this failure (and any lockout)
 		c.render(w, r, "auth_2fa_verify.html", map[string]any{"Error": "Invalid code."})
 		return
 	}
