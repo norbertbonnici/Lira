@@ -460,7 +460,7 @@ func TestSpendingAccountsAndCategorySpend(t *testing.T) {
 
 func TestBuildBurnDown(t *testing.T) {
 	// €100k, +€2k/mo, a €80k spend at month 2, over 4 months.
-	pts := BuildBurnDown(100000, 2000, nil, map[int]float64{2: 80000}, 4)
+	pts := BuildBurnDown(100000, 2000, nil, nil, map[int]float64{2: 80000}, 4)
 	want := []float64{100000, 102000, 24000, 26000, 28000} // m0..m4
 	if len(pts) != len(want) {
 		t.Fatalf("len = %d want %d", len(pts), len(want))
@@ -475,14 +475,14 @@ func TestBuildBurnDown(t *testing.T) {
 	}
 
 	// Overspending drives the balance negative (a useful signal, not an error).
-	neg := BuildBurnDown(1000, 0, nil, map[int]float64{1: 5000}, 2)
+	neg := BuildBurnDown(1000, 0, nil, nil, map[int]float64{1: 5000}, 2)
 	if neg[1].Balance != -4000 {
 		t.Errorf("negative balance = %v want -4000", neg[1].Balance)
 	}
 
 	// Recurring per-month outflows (upcoming loan repayments) draw the balance
 	// down without registering as lump-spend dots.
-	withOuts := BuildBurnDown(10000, 1000, map[int]float64{2: 400, 3: 400}, nil, 3)
+	withOuts := BuildBurnDown(10000, 1000, nil, map[int]float64{2: 400, 3: 400}, nil, 3)
 	wantOuts := []float64{10000, 11000, 11600, 12200} // +1000, then +600 net
 	for i, w := range wantOuts {
 		if withOuts[i].Balance != w {
@@ -491,6 +491,15 @@ func TestBuildBurnDown(t *testing.T) {
 	}
 	if withOuts[2].Spend != 0 {
 		t.Errorf("recurring outflow must not appear as a spend dot, got %v", withOuts[2].Spend)
+	}
+
+	// Per-month inflows (project saving set aside) add to the balance.
+	withIns := BuildBurnDown(1000, 100, map[int]float64{1: 500, 2: 500}, nil, map[int]float64{2: 1000}, 3)
+	wantIns := []float64{1000, 1600, 1200, 1300} // +600, +600−1000, +100
+	for i, w := range wantIns {
+		if withIns[i].Balance != w {
+			t.Errorf("ins month %d balance = %v want %v", i, withIns[i].Balance, w)
+		}
 	}
 }
 

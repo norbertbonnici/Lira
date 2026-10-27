@@ -349,7 +349,13 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   month-by-month projection of **spendable cash** (not NAV) — starts at current
   liquid cash (`ComputeNAV` cash), adds the planned monthly saving, and subtracts
   each active **save-financed** project's **remaining budget** as a lump at its
-  (phase/project) target date (`projectGroups` → `monthsFromNow`). Loan-financed
+  (phase/project) target date (`projectGroups` → `monthsFromNow`). **The planned
+  saving means "what the budget leaves free AFTER project commitments"** (the
+  Settings hint shows exactly that `Available`), so each save group's own
+  `MonthlyToSave` is added back as a per-month inflow (`addSavingStream` → the
+  `ins` map) for its `MonthsLeft` months — it covers `ToSave` by the lump month,
+  so the lump nets down to the financed share drawn from existing cash. Groups
+  whose lump is beyond the horizon (or undated) add neither. Loan-financed
   projects contribute no lump for the borrowed part, BUT: their unpaid deposit
   remainder is a lump at the start date (see Loan financing above), and a loan
   whose repayments **haven't started yet** deducts its monthly payment from the
@@ -357,13 +363,14 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   the `outs` map) — a pre-start loan isn't in today's budget `Available`, so the
   Settings saving figure can't already include it; RUNNING loans are left alone
   (already inside the budget → no double-count). The pure
-  `model.BuildBurnDown(start, monthlyIn, outs, events, months)` walks the balance
-  (`outs` = per-month recurring outflows, drawn but not spend-dotted; may go
+  `model.BuildBurnDown(start, monthlyIn, ins, outs, events, months)` walks the balance
+  (`ins` = per-month project saving; `outs` = per-month recurring outflows, drawn but not spend-dotted; may go
   negative = a "you'd run out" signal); `view.BurnSeries` +
   `burndownChart` draw the single line with spend-dot markers and a red zero
   baseline. Below the chart a **chronological cash ledger** (the pure-ish, unit-
   tested `buildCashLedger`): between spend clusters it folds the GROSS saving as
-  a green "Saving × N mo" row and shows any loan repayments in that window as
+  a green "Saving × N mo" row (plus a green "Saving for projects" row for that
+  window's `ins`) and shows any loan repayments in that window as
   their own explicit red "Loan payments × K mo" row (not silently netted into
   the saving figure), then draws each spend down sequentially; if repayments
   continue past the final spend, a trailing Saving/Loan-payments pair covers the

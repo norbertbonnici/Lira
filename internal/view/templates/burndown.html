@@ -23,7 +23,7 @@
 <section class="panel">
   <div class="panel-head"><h2>Cash month by month</h2></div>
   {{burndownChart .Chart}}
-  <p class="muted small">Starts at your current cash, adds {{eur .MonthlyIn}}/month, and drops by each project's remaining budget on its target date (dots). Investments are excluded — this is spendable cash. An unpaid loan deposit shows as a lump at the loan's start date{{if .HasLoanOuts}}, and a loan that hasn't started yet deducts its monthly repayment from the projected saving once it begins (running loans are already inside your monthly budget){{end}}.</p>
+  <p class="muted small">Starts at your current cash, adds {{eur .MonthlyIn}}/month, and drops by each project's remaining budget on its target date (dots).{{if .HasProjectIn}} Your monthly saving is what's left after project commitments, so each project's own monthly saving is added back until its date — by then only the part financed from existing savings comes out of your cash.{{end}} Investments are excluded — this is spendable cash. An unpaid loan deposit shows as a lump at the loan's start date{{if .HasLoanOuts}}, and a loan that hasn't started yet deducts its monthly repayment from the projected saving once it begins (running loans are already inside your monthly budget){{end}}.</p>
   <form method="get" action="/burndown" class="addrow" style="margin-top:6px">
     <label style="margin:0">Horizon (months)
       <input name="months" type="text" inputmode="numeric" value="{{.Months}}">
@@ -57,7 +57,7 @@
     {{end}}
     </tbody>
   </table>
-  <p class="muted small">Green rows are the saving that accrues between purchases; red rows are project spends{{if .HasLoanOuts}} and upcoming loan repayments (shown per stretch, and continuing to the end of the horizon after the last purchase){{end}}. The running <strong>Cash</strong> column compounds them all, so it's what you'd actually have after each event.</p>
+  <p class="muted small">Green rows are the saving that accrues between purchases{{if .HasProjectIn}} and the money set aside for projects{{end}}; red rows are project spends{{if .HasLoanOuts}} and upcoming loan repayments (shown per stretch, and continuing to the end of the horizon after the last purchase){{end}}. The running <strong>Cash</strong> column compounds them all, so it's what you'd actually have after each event.</p>
   {{else}}
   <p class="empty">No dated project spends ahead. Add a <a href="/projects/new">project</a> with a target date (e.g. a €80,000 purchase 2 months out) to see it draw your cash down.</p>
   {{end}}

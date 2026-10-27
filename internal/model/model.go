@@ -453,13 +453,14 @@ type BurnPoint struct {
 }
 
 // BuildBurnDown projects a cash balance forward `months` months: starting at
-// `start`, each month adds `monthlyIn`, subtracts `outs[m]` (recurring per-month
-// outflows, e.g. upcoming loan repayments — drawn from the balance but NOT
-// marked as spend dots), and subtracts any scheduled lump in `events` (marked as
-// that month's Spend). Both maps are keyed by 1-based month number. Month 0 is
-// today (just the starting balance). The balance may go negative — that is a
-// useful "you'd run out" signal, not an error. Pure.
-func BuildBurnDown(start, monthlyIn float64, outs, events map[int]float64, months int) []BurnPoint {
+// `start`, each month adds `monthlyIn` plus `ins[m]` (per-month inflows, e.g.
+// money set aside for a project ahead of its purchase), subtracts `outs[m]`
+// (recurring per-month outflows, e.g. upcoming loan repayments — drawn from the
+// balance but NOT marked as spend dots), and subtracts any scheduled lump in
+// `events` (marked as that month's Spend). All maps are keyed by 1-based month
+// number. Month 0 is today (just the starting balance). The balance may go
+// negative — that is a useful "you'd run out" signal, not an error. Pure.
+func BuildBurnDown(start, monthlyIn float64, ins, outs, events map[int]float64, months int) []BurnPoint {
 	if months < 0 {
 		months = 0
 	}
@@ -467,7 +468,7 @@ func BuildBurnDown(start, monthlyIn float64, outs, events map[int]float64, month
 	bal := start
 	pts = append(pts, BurnPoint{Month: 0, Balance: bal})
 	for m := 1; m <= months; m++ {
-		bal += monthlyIn - outs[m] - events[m]
+		bal += monthlyIn + ins[m] - outs[m] - events[m]
 		pts = append(pts, BurnPoint{Month: m, Balance: bal, Spend: events[m]})
 	}
 	return pts

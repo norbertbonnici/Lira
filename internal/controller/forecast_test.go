@@ -126,7 +126,7 @@ func TestBuildCashLedger(t *testing.T) {
 	// No loans: identical shape to the classic ledger — saving folds + spends,
 	// nothing trailing after the last spend.
 	spends := []burnSpend{{Month: 3, Label: "Sofa", When: "d3", Amount: 5000}}
-	rows := buildCashLedger(10000, 1000, nil, spends, labels, 12)
+	rows := buildCashLedger(10000, 1000, nil, nil, spends, labels, 12)
 	if len(rows) != 2 {
 		t.Fatalf("no-loan rows = %d want 2 (saving + spend): %+v", len(rows), rows)
 	}
@@ -142,7 +142,7 @@ func TestBuildCashLedger(t *testing.T) {
 	// balance must equal BuildBurnDown's horizon-end balance (chart ↔ ledger).
 	outs := map[int]float64{}
 	addLoanStream(outs, 2, 60, 12, 400) // €400/mo from month 2 through horizon
-	rows = buildCashLedger(10000, 1000, outs, spends, labels, 12)
+	rows = buildCashLedger(10000, 1000, nil, outs, spends, labels, 12)
 	// months 1..3: saving 3000; loan payments months 2,3 = 800; spend 5000; then
 	// trailing months 4..12: saving 9000, loan payments 9×400 = 3600.
 	if len(rows) != 5 {
@@ -157,7 +157,7 @@ func TestBuildCashLedger(t *testing.T) {
 	if rows[4].Label != "Loan payments × 9 mo" || rows[4].Amount != 3600 {
 		t.Errorf("trailing loan row = %+v", rows[4])
 	}
-	pts := model.BuildBurnDown(10000, 1000, outs, map[int]float64{3: 5000}, 12)
+	pts := model.BuildBurnDown(10000, 1000, nil, outs, map[int]float64{3: 5000}, 12)
 	if got, want := rows[len(rows)-1].Balance, pts[12].Balance; got != want {
 		t.Errorf("ledger end balance %v != chart end balance %v", got, want)
 	}
@@ -165,20 +165,34 @@ func TestBuildCashLedger(t *testing.T) {
 	// A single payment month says "Loan payment", not "× 1 mo".
 	one := map[int]float64{}
 	addLoanStream(one, 1, 1, 12, 250)
-	rows = buildCashLedger(1000, 0, one, nil, labels, 12)
+	rows = buildCashLedger(1000, 0, nil, one, nil, labels, 12)
 	if len(rows) != 1 || rows[0].Label != "Loan payment" || rows[0].Amount != 250 || rows[0].Balance != 750 {
 		t.Errorf("single payment = %+v", rows)
 	}
 
 	// No spends at all but a loan running: the timeline still shows the horizon
 	// (previously it was empty while the chart declined).
-	rows = buildCashLedger(5000, 300, outs, nil, labels, 12)
+	rows = buildCashLedger(5000, 300, nil, outs, nil, labels, 12)
 	if len(rows) != 2 {
 		t.Fatalf("no-spend loan rows = %d want 2: %+v", len(rows), rows)
 	}
-	pts = model.BuildBurnDown(5000, 300, outs, nil, 12)
+	pts = model.BuildBurnDown(5000, 300, nil, outs, nil, 12)
 	if rows[1].Balance != pts[12].Balance {
 		t.Errorf("no-spend end balance %v != chart %v", rows[1].Balance, pts[12].Balance)
+	}
+
+	// Project saving set aside before its lump: a green row per window, and the
+	// running balance still matches the chart at the spend and at the end.
+	ins := map[int]float64{}
+	addSavingStream(ins, 1000, 3) // €1000/mo for months 1..3, lump at month 4
+	spends = []burnSpend{{Month: 4, Label: "Kitchen", When: "d4", Amount: 3500}}
+	rows = buildCashLedger(10000, 200, ins, nil, spends, labels, 12)
+	if len(rows) != 3 || rows[1].Label != "Saving for projects" || rows[1].Amount != 3000 || rows[1].Months != 3 {
+		t.Fatalf("project saving rows = %+v", rows)
+	}
+	pts = model.BuildBurnDown(10000, 200, ins, nil, map[int]float64{4: 3500}, 12)
+	if rows[2].Balance != pts[4].Balance {
+		t.Errorf("after the lump: ledger %v != chart %v", rows[2].Balance, pts[4].Balance)
 	}
 }
 
@@ -226,5 +240,57 @@ func TestBurnDownShowsDepositDueThisMonth(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "Car · loan deposit") {
 		t.Error("burn-down omits the unpaid deposit of a loan starting this month")
+	}
+}
+
+func TestAddSavingStream(t *testing.T) {
+	ins := map[int]float64{}
+	addSavingStream(ins, 500, 3)
+	addSavingStream(ins, 200, 1)
+	addSavingStream(ins, 900, 0) // overdue: all due now, in month 1
+	addSavingStream(ins, 0, 5)   // nothing to save
+	want := map[int]float64{1: 1600, 2: 500, 3: 500}
+	if len(ins) != len(want) {
+		t.Fatalf("ins = %v want %v", ins, want)
+	}
+	for m, v := range want {
+		if ins[m] != v {
+			t.Errorf("month %d = %v want %v", m, ins[m], v)
+		}
+	}
+}
+
+// The Settings saving is net of project commitments, so a fully saved-for
+// project must not also come out of that saving: its lump is funded by the
+// monthly saving the budget set aside for it, leaving the end balance at
+// cash + planned saving × horizon.
+func TestBurnDownFundsSaveProjectFromItsOwnSaving(t *testing.T) {
+	c, store := testController(t)
+	_ = store.CreateAccount("Bank", "savings", "EUR", 20000, false)
+	_ = store.EnsureHousehold()
+	_ = store.SetMonthlySavings(1000)
+	now := time.Now()
+	target := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 7, 0).Format("2006-01-02")
+	pid, err := store.CreateProjectInput(model.ProjectInput{Name: "Kitchen", Status: "saving",
+		FinanceMethod: "save", TargetDate: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.CreateProjectItem(pid, nil, "Cabinets", 6000, true)
+
+	r := withUser(httptest.NewRequest(http.MethodGet, "/burndown?months=36", nil),
+		&model.Session{MFAPassed: true}, &model.User{ID: 1, Username: "a", Role: "admin"})
+	w := httptest.NewRecorder()
+	c.BurnDown(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	// 20,000 + 36 × 1,000; the €6,000 lump is covered by its own saving.
+	if !strings.Contains(body, "€56,000.00") || strings.Contains(body, "€50,000.00") {
+		t.Error("end balance should be €56,000.00 (project funded by its own saving), not €50,000.00")
+	}
+	if !strings.Contains(body, "Saving for projects") {
+		t.Error("ledger is missing the project saving row")
 	}
 }
