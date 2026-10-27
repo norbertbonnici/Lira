@@ -58,6 +58,14 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 }
 
 // decodeJSON reads a JSON request body (capped at 1 MB) into dst.
+// isDate reports a real calendar date in the YYYY-MM-DD form the ledger stores.
+// Month grouping (substr(date,1,7)) and range filters (date <= "…-31") assume
+// it, so a timestamp or "26/10/2026" would drop out of reports.
+func isDate(s string) bool {
+	_, err := time.Parse("2006-01-02", s)
+	return err == nil
+}
+
 func decodeJSON(r *http.Request, dst any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(dst)
@@ -218,6 +226,10 @@ func (c *Controller) APICreateTransaction(w http.ResponseWriter, r *http.Request
 		apiError(w, 422, "accountId, date and a non-zero amount are required")
 		return
 	}
+	if !isDate(in.Date) {
+		apiError(w, 422, "date must be YYYY-MM-DD")
+		return
+	}
 	if err := c.store.CreateTransaction(in.AccountID, in.Date, in.Amount, in.CategoryID, strings.TrimSpace(in.Payee), strings.TrimSpace(in.Notes)); err != nil {
 		apiError(w, 500, "database error")
 		return
@@ -252,6 +264,9 @@ func (c *Controller) APICreatePocket(w http.ResponseWriter, r *http.Request, u *
 	date := strings.TrimSpace(in.Date)
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
+	} else if !isDate(date) {
+		apiError(w, 422, "date must be YYYY-MM-DD")
+		return
 	}
 	if err := c.store.AddPocketEntry(u.ID, date, in.Amount, strings.TrimSpace(in.Category), strings.TrimSpace(in.Note)); err != nil {
 		apiError(w, 500, "database error")
