@@ -24,8 +24,9 @@ func (c *Controller) TokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-render the originating page with the plaintext shown once (it can't be
-	// recovered). Pocket is the per-user home members reach; Settings is admin.
-	if r.FormValue("from") == "pocket" {
+	// recovered). Pocket is the per-user home members reach; Settings is admin
+	// only, so a member always lands on Pocket whatever `from` says.
+	if r.FormValue("from") == "pocket" || u.Role != "admin" {
 		c.renderPocket(w, r, map[string]any{"NewToken": plain})
 		return
 	}
@@ -40,7 +41,7 @@ func (c *Controller) TokenRevoke(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	_ = c.store.DeleteAPIToken(u.ID, pathID(r))
 	dest := "/settings"
-	if r.FormValue("from") == "pocket" {
+	if r.FormValue("from") == "pocket" || u.Role != "admin" {
 		dest = "/pocket"
 	}
 	http.Redirect(w, r, dest, http.StatusSeeOther)

@@ -180,3 +180,48 @@ func TestParallelInviteAcceptCreatesOneUser(t *testing.T) {
 		t.Errorf("users after 4 parallel uses of one invite = %d want 2", n)
 	}
 }
+
+// A locked account answers exactly like an unknown username, so the lockout
+// can't confirm which usernames exist.
+func TestLockedLoginLooksLikeUnknownUser(t *testing.T) {
+	c, store := testController(t)
+	hash, _ := hashPassword("pw")
+	_, _ = store.CreateUser("carol", hash, "admin")
+	login := func(user, pw string) string {
+		w := httptest.NewRecorder()
+		c.Login(w, postForm("/login", url.Values{"username": {user}, "password": {pw}}))
+		return strings.ReplaceAll(w.Body.String(), user, "USER")
+	}
+	for i := 0; i < maxFailed; i++ {
+		login("carol", "wrong")
+	}
+	locked, unknown := login("carol", "wrong"), login("nobody", "wrong")
+	if strings.Contains(locked, "locked") || locked != unknown {
+		t.Error("a locked account's login page differs from an unknown username's")
+	}
+}
+
+// A member posting the token form without from=pocket must not get the
+// admin-only Settings page (member list, invites, budget).
+func TestTokenCreateNeverShowsSettingsToMembers(t *testing.T) {
+	c, store := testController(t)
+	uid, _ := store.CreateUser("member", "h", "member")
+	r := withUser(postForm("/tokens", url.Values{"name": {"phone"}}),
+		&model.Session{MFAPassed: true}, &model.User{ID: uid, Username: "member", Role: "member"})
+	w := httptest.NewRecorder()
+	c.TokenCreate(w, r)
+	if strings.Contains(w.Body.String(), "Invite") || strings.Contains(w.Body.String(), "<h1 class=\"display\">Settings") {
+		t.Error("member saw the Settings page after creating a token")
+	}
+	if !strings.Contains(w.Body.String(), "lira_") {
+		t.Error("the new token wasn't shown on the page the member got")
+	}
+
+	r = withUser(postForm("/tokens/1/delete", url.Values{}),
+		&model.Session{MFAPassed: true}, &model.User{ID: uid, Username: "member", Role: "member"})
+	w = httptest.NewRecorder()
+	c.TokenRevoke(w, r)
+	if loc := w.Header().Get("Location"); loc != "/pocket" {
+		t.Errorf("member revoke redirects to %q want /pocket", loc)
+	}
+}

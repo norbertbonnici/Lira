@@ -169,6 +169,10 @@ func (c *Controller) InviteAccept(w http.ResponseWriter, r *http.Request) {
 
 // ---------- Login ----------
 
+// dummyHash is compared against when there is no real hash to check (unknown or
+// locked user), so those refusals cost the same bcrypt time as a real one.
+const dummyHash = "$2a$12$...................................................."
+
 func (c *Controller) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		c.render(w, r, "auth_login.html", map[string]any{"CanRegister": c.registrationOpen()})
@@ -181,15 +185,18 @@ func (c *Controller) Login(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(r.FormValue("username"))
 	pw := r.FormValue("password")
 
+	// One message for every refusal — unknown user, wrong password, or locked —
+	// so the lockout can't be used to confirm that a username exists.
 	invalid := func() {
 		c.render(w, r, "auth_login.html", map[string]any{
-			"Error": "Invalid username or password.", "Username": username, "CanRegister": c.registrationOpen()})
+			"Error":    "Invalid username or password. After repeated failures, sign-in pauses for 15 minutes.",
+			"Username": username, "CanRegister": c.registrationOpen()})
 	}
 
 	user, err := c.store.GetUserByUsername(username)
 	if err != nil {
 		// Dummy compare to keep timing roughly uniform for unknown users.
-		_ = checkPassword("$2a$12$....................................................", pw)
+		_ = checkPassword(dummyHash, pw)
 		invalid()
 		return
 	}
@@ -200,9 +207,9 @@ func (c *Controller) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !ok {
-		c.render(w, r, "auth_login.html", map[string]any{
-			"Error":    "Account temporarily locked after too many attempts. Try again shortly.",
-			"Username": username, "CanRegister": c.registrationOpen()})
+		// Locked: same answer and same bcrypt cost as an unknown username.
+		_ = checkPassword(dummyHash, pw)
+		invalid()
 		return
 	}
 	if !checkPassword(user.PasswordHash, pw) {
