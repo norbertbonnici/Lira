@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"lira/internal/model"
 )
@@ -60,31 +61,96 @@ func parseCSVDate(value, layout string) (string, bool) {
 }
 
 // parseCSVAmount parses a monetary string. With decimalComma, ',' is the decimal
-// separator and '.' is thousands; otherwise the reverse. Strips currency symbols
-// and spaces, and treats parenthesised values as negative (accounting style).
+// separator and '.' is thousands; otherwise the reverse. Accepts currency symbols,
+// a 3-letter currency code, spaces/apostrophes as digit grouping, a leading or
+// trailing minus (ASCII or U+2212), parentheses (accounting negative) and a DR/CR
+// suffix (DR = money out).
+//
+// It refuses anything it would otherwise have to guess at, rather than import a
+// wrong number: a thousands separator not followed by exactly 3 digits ("12,50"
+// without decimalComma — almost certainly a decimal comma, which would otherwise
+// become 1250), a separator after the decimal point ("1.234,56" without
+// decimalComma), stray letters ("1e3"), or more than one sign.
 func parseCSVAmount(value string, decimalComma bool) (float64, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	s := strings.TrimSpace(value)
+	neg := false
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		neg, s = true, strings.TrimSpace(s[1:len(s)-1])
+	}
+	// Peel a trailing then a leading run of ASCII letters: a DR/CR marker or a
+	// 3-letter currency code. Any other letters make the value unparseable.
+	trail := len(s)
+	for trail > 0 && isASCIILetter(s[trail-1]) {
+		trail--
+	}
+	switch suffix := strings.ToUpper(s[trail:]); {
+	case suffix == "DR":
+		neg = true
+	case suffix == "" || suffix == "CR" || len(suffix) == 3:
+	default:
 		return 0, false
 	}
-	neg := false
-	if strings.HasPrefix(value, "(") && strings.HasSuffix(value, ")") {
-		neg, value = true, value[1:len(value)-1]
+	s = s[:trail]
+	lead := 0
+	for lead < len(s) && isASCIILetter(s[lead]) {
+		lead++
 	}
+	if lead != 0 && lead != 3 {
+		return 0, false
+	}
+	s = s[lead:]
+
 	var b strings.Builder
-	for _, r := range value {
-		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '-' || r == '+' {
+	for _, r := range s {
+		switch {
+		case (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '+' || r == '-':
 			b.WriteRune(r)
+		case r == '\u2212': // typographic minus
+			b.WriteByte('-')
+		case unicode.IsSpace(r) || r == '\'' || r == '\u2019' || unicode.Is(unicode.Sc, r):
+			// digit grouping or a currency symbol
+		default:
+			return 0, false
 		}
 	}
-	s := b.String()
-	if decimalComma {
-		s = strings.ReplaceAll(s, ".", "")
-		s = strings.ReplaceAll(s, ",", ".")
-	} else {
-		s = strings.ReplaceAll(s, ",", "")
+	num := b.String()
+	if n := len(num); n > 0 && (num[0] == '-' || num[0] == '+') {
+		neg = neg || num[0] == '-'
+		num = num[1:]
+	} else if n > 0 && num[n-1] == '-' { // "12.00-"
+		neg, num = true, num[:n-1]
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	if strings.ContainsAny(num, "+-") {
+		return 0, false
+	}
+
+	dec, grp := ".", ","
+	if decimalComma {
+		dec, grp = ",", "."
+	}
+	intPart, frac, hasDec := strings.Cut(num, dec)
+	if strings.Contains(frac, dec) || strings.Contains(frac, grp) {
+		return 0, false
+	}
+	if strings.Contains(intPart, grp) {
+		groups := strings.Split(intPart, grp)
+		if len(groups[0]) < 1 || len(groups[0]) > 3 {
+			return 0, false
+		}
+		for _, g := range groups[1:] {
+			if len(g) != 3 {
+				return 0, false
+			}
+		}
+		intPart = strings.Join(groups, "")
+	}
+	if intPart == "" && frac == "" {
+		return 0, false
+	}
+	if hasDec {
+		intPart += "." + frac
+	}
+	f, err := strconv.ParseFloat(intPart, 64)
 	if err != nil {
 		return 0, false
 	}
@@ -92,6 +158,18 @@ func parseCSVAmount(value string, decimalComma bool) (float64, bool) {
 		f = -f
 	}
 	return f, true
+}
+
+func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
+
+// blankAmount reports an empty amount cell, or the lone-dash placeholder some
+// banks put in the unused debit/credit column.
+func blankAmount(s string) bool {
+	switch s {
+	case "", "-", "\u2013", "\u2014":
+		return true
+	}
+	return false
 }
 
 // ---------- export ----------
@@ -276,20 +354,30 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var amount float64
-		var aok bool
+		var aok, bad bool // bad: a non-blank amount cell that didn't parse
 		if debitCredit {
-			if d := get(row, debitCol); d != "" {
+			if d := get(row, debitCol); !blankAmount(d) {
 				if v, vok := parseCSVAmount(d, decimalComma); vok {
 					amount, aok = amount-absf(v), true
+				} else {
+					bad = true
 				}
 			}
-			if cr := get(row, creditCol); cr != "" {
+			if cr := get(row, creditCol); !blankAmount(cr) {
 				if v, vok := parseCSVAmount(cr, decimalComma); vok {
 					amount, aok = amount+absf(v), true
+				} else {
+					bad = true
 				}
 			}
-		} else {
-			amount, aok = parseCSVAmount(get(row, amountCol), decimalComma)
+		} else if a := get(row, amountCol); !blankAmount(a) {
+			amount, aok = parseCSVAmount(a, decimalComma)
+			bad = !aok
+		}
+		if bad {
+			skipped++
+			reasons["Unparseable amount (check the comma-decimals option)"]++
+			continue
 		}
 		if !aok || amount == 0 {
 			skipped++
