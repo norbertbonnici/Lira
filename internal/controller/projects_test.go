@@ -1,7 +1,12 @@
 package controller
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
+	"time"
 
 	"lira/internal/model"
 )
@@ -57,5 +62,81 @@ func TestStillToDraw(t *testing.T) {
 	fresh := &model.Project{FinanceMethod: "save"}
 	if got := stillToDraw(fresh, plan); got != 1500 {
 		t.Errorf("fresh: stillToDraw = %v want 1500", got)
+	}
+}
+
+func TestLoanRepaying(t *testing.T) {
+	now := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	loan := func(start string, term int) *model.Project {
+		return &model.Project{FinanceMethod: "loan", LoanTermMonths: term, LoanStartDate: start}
+	}
+	cases := []struct {
+		name string
+		p    *model.Project
+		want bool
+	}{
+		{"save project", &model.Project{FinanceMethod: "save"}, false},
+		{"loan without term", loan("2026-01-01", 0), false},
+		{"starts later", loan("2027-03-01", 12), true},
+		{"starts this month", loan("2026-10-30", 12), true},
+		{"mid-term", loan("2026-01-15", 12), true},
+		{"last payment this month", loan("2025-11-01", 12), true},
+		{"repaid", loan("2025-10-01", 12), false},
+		{"long repaid", loan("2020-01-01", 24), false},
+		{"undated runs", loan("", 12), true},
+	}
+	for _, tc := range cases {
+		if got := loanRepaying(tc.p, now); got != tc.want {
+			t.Errorf("%s: loanRepaying = %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Paying a loan project's last item must not complete it while repayments are
+// still running (completing drops the loan payment from the budget); a save
+// project still auto-completes.
+func TestItemPurchaseKeepsRunningLoanActive(t *testing.T) {
+	c, store := newTestController(t)
+	_ = store.CreateAccount("Current", "checking", "EUR", 50000, false)
+	accts, _ := store.ListAccounts()
+	acct := accts[0].ID
+
+	start := time.Now().AddDate(0, -1, 0).Format("2006-01-02")
+	mk := func(in model.ProjectInput) (pid, itemID int64) {
+		t.Helper()
+		pid, err := store.CreateProjectInput(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateProjectItem(pid, nil, "Thing", 1000, true); err != nil {
+			t.Fatal(err)
+		}
+		items, _ := store.ListProjectItems(pid)
+		return pid, items[0].ID
+	}
+	loanPID, loanItem := mk(model.ProjectInput{Name: "Car", Status: "saving", FinanceMethod: "loan",
+		LoanAPR: 5, LoanTermMonths: 60, LoanStartDate: start})
+	savePID, saveItem := mk(model.ProjectInput{Name: "Sofa", Status: "saving", FinanceMethod: "save"})
+
+	pay := func(pid, itemID int64) {
+		t.Helper()
+		r := postForm("/", url.Values{"account_id": {strconv.FormatInt(acct, 10)},
+			"amount": {"1000"}, "date": {time.Now().Format("2006-01-02")}})
+		r.SetPathValue("id", strconv.FormatInt(pid, 10))
+		r.SetPathValue("itemID", strconv.FormatInt(itemID, 10))
+		w := httptest.NewRecorder()
+		c.ItemPurchase(w, r)
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("pay item: status %d", w.Code)
+		}
+	}
+	pay(loanPID, loanItem)
+	pay(savePID, saveItem)
+
+	if p, _ := store.GetProject(loanPID); p.Status == "completed" {
+		t.Error("loan project with repayments still running was auto-completed")
+	}
+	if p, _ := store.GetProject(savePID); p.Status != "completed" {
+		t.Errorf("fully paid save project status = %q want completed", p.Status)
 	}
 }

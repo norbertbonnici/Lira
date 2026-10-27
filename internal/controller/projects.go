@@ -138,6 +138,22 @@ func loanFinanced(p *model.Project) bool {
 	return p.FinanceMethod == "loan" && p.LoanTermMonths > 0
 }
 
+// loanRepaying reports whether a loan-financed project still has repayments
+// ahead of it at now (not started yet, or mid-term), using the same month
+// granularity as model.FinanceWithLoan. A loan with no usable start date is
+// treated as running, as FinanceWithLoan keeps charging it.
+func loanRepaying(p *model.Project, now time.Time) bool {
+	if !loanFinanced(p) {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", p.LoanStartDate)
+	if err != nil {
+		return true
+	}
+	diff := (t.Year()*12 + int(t.Month())) - (now.Year()*12 + int(now.Month()))
+	return diff > -p.LoanTermMonths
+}
+
 // projectInput builds the editable project fields from a submitted form.
 func projectInput(r *http.Request) model.ProjectInput {
 	term := int(parseFloat(r.FormValue("loan_term_months")))
@@ -682,9 +698,13 @@ func (c *Controller) ItemPurchase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	// Auto-complete the project once every item is fully paid.
+	// Auto-complete the project once every item is fully paid — unless it is
+	// loan-financed with repayments still to come: a completed project leaves the
+	// budget, which would silently drop the monthly loan payment from it.
 	if n, err := c.store.CountUnpurchasedItems(pid); err == nil && n == 0 {
-		_ = c.store.SetProjectStatus(pid, "completed")
+		if p, err := c.store.GetProject(pid); err == nil && !loanRepaying(p, time.Now()) {
+			_ = c.store.SetProjectStatus(pid, "completed")
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
