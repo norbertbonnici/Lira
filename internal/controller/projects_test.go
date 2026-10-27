@@ -200,3 +200,70 @@ func TestItemNegativeEstimateIgnored(t *testing.T) {
 		t.Errorf("estimate after a negative update = %v want 1000 kept", it.EstimatedCost)
 	}
 }
+
+// Item and phase handlers act only on an item/phase of the project in the URL:
+// pointed at another project's, they change nothing.
+func TestItemAndPhaseHandlersCheckProject(t *testing.T) {
+	c, store := testController(t)
+	_ = store.CreateAccount("Bank", "savings", "EUR", 5000, false)
+	accts, _ := store.ListAccounts()
+	a, _ := store.CreateProjectInput(model.ProjectInput{Name: "A", Status: "saving", FinanceMethod: "save"})
+	b, _ := store.CreateProjectInput(model.ProjectInput{Name: "B", Status: "saving", FinanceMethod: "save"})
+	_ = store.CreatePhase(b, "B phase", "2027-01-01")
+	phases, _ := store.ListPhases(b)
+	bPhase := phases[0].ID
+	_ = store.CreateProjectItem(b, nil, "B item", 100, true)
+	items, _ := store.ListProjectItems(b)
+	bItem := items[0].ID
+
+	// call runs h against project A's URL, aimed at B's item/phase.
+	call := func(h http.HandlerFunc, method string, form url.Values) *httptest.ResponseRecorder {
+		var r *http.Request
+		if method == http.MethodGet {
+			r = httptest.NewRequest(http.MethodGet, "/", nil)
+		} else {
+			r = postForm("/", form)
+		}
+		r = withUser(r, &model.Session{MFAPassed: true}, &model.User{ID: 1, Username: "a", Role: "admin"})
+		r.SetPathValue("id", strconv.FormatInt(a, 10))
+		r.SetPathValue("itemID", strconv.FormatInt(bItem, 10))
+		r.SetPathValue("phaseID", strconv.FormatInt(bPhase, 10))
+		w := httptest.NewRecorder()
+		h(w, r)
+		return w
+	}
+
+	for name, h := range map[string]http.HandlerFunc{"ItemEdit": c.ItemEdit, "PhaseEdit": c.PhaseEdit, "ItemPurchaseForm": c.ItemPurchaseForm} {
+		if w := call(h, http.MethodGet, nil); w.Code != http.StatusNotFound {
+			t.Errorf("%s on another project's object: status %d want 404", name, w.Code)
+		}
+	}
+	call(c.ItemPurchase, http.MethodPost, url.Values{"account_id": {strconv.FormatInt(accts[0].ID, 10)},
+		"amount": {"100"}, "date": {"2026-10-01"}})
+	call(c.ItemUpdate, http.MethodPost, url.Values{"name": {"hijacked"}, "estimated_cost": {"1"}})
+	call(c.PhaseUpdate, http.MethodPost, url.Values{"name": {"hijacked"}})
+	call(c.ItemCreate, http.MethodPost, url.Values{"name": {"stray"}, "estimated_cost": {"50"},
+		"phase_id": {strconv.FormatInt(bPhase, 10)}})
+
+	if it, _ := store.GetProjectItem(bItem); it.Name != "B item" || it.EstimatedCost != 100 || it.AmountPaid != 0 {
+		t.Errorf("B's item changed through A's URL: %+v", it)
+	}
+	if pa, _ := store.GetProject(a); pa.Status == "completed" {
+		t.Error("paying B's item through A's URL completed project A")
+	}
+	if ph, _ := store.GetPhase(bPhase); ph.Name != "B phase" {
+		t.Errorf("B's phase renamed through A's URL: %q", ph.Name)
+	}
+	if its, _ := store.ListProjectItems(a); len(its) != 0 {
+		t.Errorf("item created in A under B's phase: %+v", its)
+	}
+
+	call(c.ItemDelete, http.MethodPost, url.Values{})
+	call(c.PhaseDelete, http.MethodPost, url.Values{})
+	if _, err := store.GetProjectItem(bItem); err != nil {
+		t.Error("B's item deleted through A's URL")
+	}
+	if _, err := store.GetPhase(bPhase); err != nil {
+		t.Error("B's phase deleted through A's URL")
+	}
+}

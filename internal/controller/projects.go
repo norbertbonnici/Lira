@@ -537,6 +537,36 @@ func (c *Controller) ProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 // ---------- Project items ----------
 
+// projectItem loads the {itemID} item only if it belongs to the {id} project in
+// the URL, so a handler can't be pointed at another project's item (which
+// would, e.g., auto-complete the wrong project). ItemMove does the same.
+func (c *Controller) projectItem(r *http.Request) (*model.ProjectItem, bool) {
+	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
+	if err != nil || it.ProjectID != pathID(r) {
+		return nil, false
+	}
+	return it, true
+}
+
+// projectPhase is projectItem for the {phaseID} phase.
+func (c *Controller) projectPhase(r *http.Request) (*model.Phase, bool) {
+	ph, err := c.store.GetPhase(pathInt(r, "phaseID"))
+	if err != nil || ph.ProjectID != pathID(r) {
+		return nil, false
+	}
+	return ph, true
+}
+
+// phaseOfProject reports whether an optional phase id (nil = General) belongs
+// to project pid.
+func (c *Controller) phaseOfProject(phaseID *int64, pid int64) bool {
+	if phaseID == nil {
+		return true
+	}
+	ph, err := c.store.GetPhase(*phaseID)
+	return err == nil && ph.ProjectID == pid
+}
+
 func (c *Controller) ItemCreate(w http.ResponseWriter, r *http.Request) {
 	if !c.checkCSRF(r) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
@@ -545,9 +575,11 @@ func (c *Controller) ItemCreate(w http.ResponseWriter, r *http.Request) {
 	pid := pathID(r)
 	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
 	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
-			_ = c.store.CreateProjectItem(pid, nullableID(r.FormValue("phase_id")), name,
-				est, r.FormValue("essential") != "0")
+		phase := nullableID(r.FormValue("phase_id"))
+		// A phase from another project would leave the item in no group (its
+		// cost silently missing from the plan), so it's ignored like ItemMove does.
+		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 && c.phaseOfProject(phase, pid) {
+			_ = c.store.CreateProjectItem(pid, phase, name, est, r.FormValue("essential") != "0")
 		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
@@ -568,8 +600,8 @@ func (c *Controller) PhaseCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) PhaseEdit(w http.ResponseWriter, r *http.Request) {
-	ph, err := c.store.GetPhase(pathInt(r, "phaseID"))
-	if err != nil {
+	ph, ok := c.projectPhase(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -585,8 +617,10 @@ func (c *Controller) PhaseUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
-	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.UpdatePhase(pathInt(r, "phaseID"), name, strings.TrimSpace(r.FormValue("target_date")))
+	if ph, ok := c.projectPhase(r); ok {
+		if name := strings.TrimSpace(r.FormValue("name")); name != "" {
+			_ = c.store.UpdatePhase(ph.ID, name, strings.TrimSpace(r.FormValue("target_date")))
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
@@ -596,13 +630,15 @@ func (c *Controller) PhaseDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	_ = c.store.DeletePhase(pathInt(r, "phaseID"))
+	if ph, ok := c.projectPhase(r); ok {
+		_ = c.store.DeletePhase(ph.ID)
+	}
 	http.Redirect(w, r, projectURL(pathID(r)), http.StatusSeeOther)
 }
 
 func (c *Controller) ItemEdit(w http.ResponseWriter, r *http.Request) {
-	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
-	if err != nil {
+	it, ok := c.projectItem(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -619,9 +655,11 @@ func (c *Controller) ItemUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := pathID(r)
 	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
-	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
-			_ = c.store.UpdateProjectItem(pathInt(r, "itemID"), name, est, r.FormValue("essential") != "0")
+	if it, ok := c.projectItem(r); ok {
+		if name := strings.TrimSpace(r.FormValue("name")); name != "" {
+			if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
+				_ = c.store.UpdateProjectItem(it.ID, name, est, r.FormValue("essential") != "0")
+			}
 		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
@@ -632,7 +670,9 @@ func (c *Controller) ItemDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	_ = c.store.DeleteProjectItem(pathInt(r, "itemID"))
+	if it, ok := c.projectItem(r); ok {
+		_ = c.store.DeleteProjectItem(it.ID)
+	}
 	http.Redirect(w, r, projectURL(pathID(r)), http.StatusSeeOther)
 }
 
@@ -643,19 +683,15 @@ func (c *Controller) ItemMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
-	// Item must belong to this project.
-	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
-	if err != nil || it.ProjectID != pid {
+	it, ok := c.projectItem(r) // item must belong to this project
+	if !ok {
 		http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 		return
 	}
 	target := nullableID(r.FormValue("phase_id"))
-	// A named target phase must belong to this same project.
-	if target != nil {
-		if ph, err := c.store.GetPhase(*target); err != nil || ph.ProjectID != pid {
-			http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
-			return
-		}
+	if !c.phaseOfProject(target, pid) { // a named target phase must be this project's
+		http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
+		return
 	}
 	_ = c.store.SetItemPhase(it.ID, target)
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
@@ -693,8 +729,8 @@ func (c *Controller) payFormData(pid, itemID int64, errMsg string) map[string]an
 
 func (c *Controller) ItemPurchaseForm(w http.ResponseWriter, r *http.Request) {
 	pid, itemID := pathID(r), pathInt(r, "itemID")
-	it, err := c.store.GetProjectItem(itemID)
-	if err != nil {
+	it, ok := c.projectItem(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -712,7 +748,7 @@ func (c *Controller) ItemPurchase(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := pathID(r)
 	itemID := pathInt(r, "itemID")
-	if _, err := c.store.GetProjectItem(itemID); err != nil { // item gone since the form loaded
+	if _, ok := c.projectItem(r); !ok { // gone since the form loaded, or another project's
 		http.NotFound(w, r)
 		return
 	}
