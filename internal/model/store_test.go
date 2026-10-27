@@ -1412,3 +1412,55 @@ func TestDepositPaidDateIgnoresRefunds(t *testing.T) {
 		t.Errorf("DepositPaidDate = %q want 2026-08-20 (the real payment, not the refund)", p.DepositPaidDate)
 	}
 }
+
+// Insights/savings-rate aggregates must be in EUR, like NAV and CategorySpend:
+// a −£100 spend at 1.15 is €115, not 100.
+func TestMonthlyTotalsAndSpendByCategoryConvertToEUR(t *testing.T) {
+	s := testStore(t)
+	_ = s.EnsureDefaultCategories()
+	_ = s.CreateAccount("EUR acct", "checking", "EUR", 0, false)
+	_ = s.CreateAccount("GBP acct", "checking", "GBP", 0, false)
+	if err := s.UpsertFXRate("GBP", 1.15); err != nil {
+		t.Fatal(err)
+	}
+	var eurID, gbpID int64
+	accts, _ := s.ListAccounts()
+	for _, a := range accts {
+		if a.Currency == "GBP" {
+			gbpID = a.ID
+		} else {
+			eurID = a.ID
+		}
+	}
+	var groceries *int64
+	cats, _ := s.ListCategories()
+	for _, c := range cats {
+		if c.Name == "Groceries" {
+			id := c.ID
+			groceries = &id
+		}
+	}
+	_ = s.CreateTransaction(eurID, "2026-05-01", 2000, nil, "Salary", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-02", 1000, nil, "UK pay", "")
+	_ = s.CreateTransaction(eurID, "2026-05-10", -50, groceries, "Lidl", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-11", -100, groceries, "Tesco", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-12", -20, nil, "Pub", "")
+
+	m, err := s.MonthlyTotals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := func(a, b float64) bool { return a-b < 0.001 && b-a < 0.001 }
+	if may := m["2026-05"]; !near(may.Income, 3150) || !near(may.Expense, 188) || may.Month != "2026-05" {
+		t.Errorf("May totals = %+v want income 3150 / expense 188 (50 + 115 + 23)", may)
+	}
+
+	ct, err := s.SpendByCategory("2026-05-01", "2026-05-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ct) != 2 || ct[0].Category != "Groceries" || !near(ct[0].Amount, 165) ||
+		ct[1].Category != "Uncategorized" || !near(ct[1].Amount, 23) {
+		t.Errorf("SpendByCategory = %+v want Groceries 165 (merged across currencies), Uncategorized 23", ct)
+	}
+}

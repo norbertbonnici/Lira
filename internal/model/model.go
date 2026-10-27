@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -1405,27 +1406,54 @@ type CategoryTotal struct {
 	Amount   float64 // total expense (positive)
 }
 
-// MonthlyTotals returns income/expense per calendar month, keyed by "YYYY-MM".
+// MonthlyTotals returns income/expense per calendar month, keyed by "YYYY-MM",
+// converted to EUR by each account's currency.
 func (s *Store) MonthlyTotals() (map[string]MonthTotal, error) {
+	rate, err := s.eurRate()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
-		SELECT substr(date,1,7) AS m,
-		       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),
-		       SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END)
-		FROM transactions WHERE transfer_id IS NULL
-		GROUP BY m`)
+		SELECT substr(t.date,1,7) AS m, a.currency,
+		       SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),
+		       SUM(CASE WHEN t.amount<0 THEN -t.amount ELSE 0 END)
+		FROM transactions t JOIN accounts a ON a.id=t.account_id
+		WHERE t.transfer_id IS NULL
+		GROUP BY m, a.currency`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]MonthTotal{}
 	for rows.Next() {
-		var t MonthTotal
-		if err := rows.Scan(&t.Month, &t.Income, &t.Expense); err != nil {
+		var m, ccy string
+		var inc, exp float64
+		if err := rows.Scan(&m, &ccy, &inc, &exp); err != nil {
 			return nil, err
 		}
-		out[t.Month] = t
+		t := out[m]
+		t.Month = m
+		t.Income += inc * rate(ccy)
+		t.Expense += exp * rate(ccy)
+		out[m] = t
 	}
 	return out, rows.Err()
+}
+
+// eurRate returns a converter from a currency code to its EUR rate, using the
+// stored fx_rates. A blank, unknown or non-positive rate counts as 1 (EUR) until
+// a rate is fetched.
+func (s *Store) eurRate() (func(ccy string) float64, error) {
+	rates, err := s.GetFXRates()
+	if err != nil {
+		return nil, err
+	}
+	return func(ccy string) float64 {
+		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
+			return r
+		}
+		return 1
+	}, nil
 }
 
 // CategorySpend returns this-period actual spend per transaction category, keyed
@@ -1434,15 +1462,9 @@ func (s *Store) MonthlyTotals() (map[string]MonthTotal, error) {
 // flagged as spending accounts — the dedicated operating-cost accounts. Used to
 // measure budgets (operating costs) against actuals.
 func (s *Store) CategorySpend(from, to string, spendingOnly bool) (map[int64]float64, error) {
-	rates, err := s.GetFXRates()
+	rate, err := s.eurRate()
 	if err != nil {
 		return nil, err
-	}
-	rate := func(ccy string) float64 {
-		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
-			return r
-		}
-		return 1
 	}
 	q := `SELECT t.category_id, a.currency, SUM(-t.amount)
 	      FROM transactions t JOIN accounts a ON a.id=t.account_id
@@ -1489,26 +1511,46 @@ func BudgetStatus(actual, budget float64) (pct int, state string) {
 }
 
 // SpendByCategory returns total expense per category over [from,to] (inclusive
-// YYYY-MM-DD), largest first.
+// YYYY-MM-DD), converted to EUR, largest first.
 func (s *Store) SpendByCategory(from, to string) ([]CategoryTotal, error) {
+	rate, err := s.eurRate()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
-		SELECT COALESCE(NULLIF(c.name,''),'Uncategorized') AS cat, SUM(-t.amount)
-		FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
+		SELECT COALESCE(NULLIF(c.name,''),'Uncategorized') AS cat, a.currency, SUM(-t.amount)
+		FROM transactions t
+		JOIN accounts a ON a.id=t.account_id
+		LEFT JOIN categories c ON c.id=t.category_id
 		WHERE t.amount<0 AND t.transfer_id IS NULL AND t.date>=? AND t.date<=?
-		GROUP BY cat ORDER BY SUM(-t.amount) DESC`, from, to)
+		GROUP BY cat, a.currency`, from, to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []CategoryTotal
+	sums := map[string]float64{}
 	for rows.Next() {
-		var c CategoryTotal
-		if err := rows.Scan(&c.Category, &c.Amount); err != nil {
+		var cat, ccy string
+		var sum float64
+		if err := rows.Scan(&cat, &ccy, &sum); err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		sums[cat] += sum * rate(ccy)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]CategoryTotal, 0, len(sums))
+	for cat, amt := range sums {
+		out = append(out, CategoryTotal{Category: cat, Amount: amt})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Amount != out[j].Amount {
+			return out[i].Amount > out[j].Amount
+		}
+		return out[i].Category < out[j].Category
+	})
+	return out, nil
 }
 
 // Holdings
@@ -1985,18 +2027,9 @@ func (s *Store) ListItemPayments(itemID int64) ([]Transaction, error) {
 // ComputeNAV returns (cash, investments, total). v1 treats all amounts as the
 // base currency (EUR); multi-currency conversion arrives with a later release.
 func (s *Store) ComputeNAV() (cash, investments, total float64, err error) {
-	rates, err := s.GetFXRates()
+	rate, err := s.eurRate()
 	if err != nil {
 		return 0, 0, 0, err
-	}
-	rate := func(ccy string) float64 {
-		if ccy == "" {
-			return 1
-		}
-		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
-			return r
-		}
-		return 1 // unknown currency: treat as EUR until a rate is fetched
 	}
 	accts, err := s.ListAccounts()
 	if err != nil {
