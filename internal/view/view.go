@@ -475,11 +475,16 @@ func (v *View) StaticHandler() http.Handler {
 // ---------- display funcs ----------
 
 func eur(val float64) string {
-	neg := val < 0
-	if neg {
-		val = -val
+	// A NaN/Inf (e.g. from a division upstream) has no "." to split on and
+	// would panic, failing the whole page render; show a dash instead.
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return "\u20ac—"
 	}
-	s := strconv.FormatFloat(val, 'f', 2, 64)
+	neg := val < 0
+	s := strconv.FormatFloat(math.Abs(val), 'f', 2, 64) // Abs also clears a -0
+	if s == "0.00" {
+		neg = false // float leftovers like -0.001 show as €0.00, not "-€0.00"
+	}
 	dot := strings.IndexByte(s, '.')
 	intPart, frac := s[:dot], s[dot+1:]
 	var b strings.Builder
@@ -498,10 +503,12 @@ func eur(val float64) string {
 }
 
 func signClass(val float64) string {
+	// Under half a cent either way is zero, matching what eur displays, so a
+	// float leftover like -0.001 isn't coloured as a loss.
 	switch {
-	case val > 0:
+	case val >= 0.005:
 		return "pos"
-	case val < 0:
+	case val <= -0.005:
 		return "neg"
 	default:
 		return "zero"

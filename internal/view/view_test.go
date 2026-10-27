@@ -2,6 +2,7 @@ package view
 
 import (
 	"database/sql"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -301,10 +302,17 @@ func TestShortEUR(t *testing.T) {
 }
 
 func TestEUR(t *testing.T) {
-	cases := map[float64]string{0: "\u20ac0.00", 1234.5: "\u20ac1,234.50", -1000000: "-\u20ac1,000,000.00", 12.345: "\u20ac12.35"}
+	cases := map[float64]string{0: "\u20ac0.00", 1234.5: "\u20ac1,234.50", -1000000: "-\u20ac1,000,000.00", 12.345: "\u20ac12.35",
+		-0.001: "\u20ac0.00", math.Copysign(0, -1): "\u20ac0.00", -0.005: "-\u20ac0.01",
+		math.NaN(): "\u20ac—", math.Inf(1): "\u20ac—", math.Inf(-1): "\u20ac—"}
 	for in, want := range cases {
 		if got := eur(in); got != want {
 			t.Errorf("eur(%v)=%q want %q", in, got, want)
+		}
+	}
+	for in, want := range map[float64]string{-0.001: "zero", 0.004: "zero", 0.005: "pos", -0.01: "neg", math.NaN(): "zero"} {
+		if got := signClass(in); got != want {
+			t.Errorf("signClass(%v)=%q want %q", in, got, want)
 		}
 	}
 }
