@@ -16,6 +16,12 @@ import (
 
 const csvMaxBytes = 5 << 20 // 5 MB
 
+// ImportBodyLimit is the request-body cap main applies to the import routes
+// (everything else gets a much smaller default). The commit form re-posts the
+// whole CSV URL-encoded, which can grow it up to 3× (every byte "%XX"), plus
+// room for the other form fields.
+const ImportBodyLimit = 3*csvMaxBytes + 64<<10
+
 // dateLayouts offered for import (Go reference-time layouts).
 var dateLayouts = []struct{ Value, Label string }{
 	{"2006-01-02", "YYYY-MM-DD (2026-01-31)"},
@@ -235,20 +241,29 @@ func (c *Controller) uploadError(w http.ResponseWriter, r *http.Request, msg str
 }
 
 func (c *Controller) ImportPreview(w http.ResponseWriter, r *http.Request) {
-	if !c.checkCSRF(r) {
-		http.Error(w, "invalid CSRF token", http.StatusForbidden)
-		return
-	}
+	// Parse the upload BEFORE checkCSRF reads a form field: that read would parse
+	// it with Go's 32 MB default instead, and an oversized upload would surface
+	// as a confusing CSRF error. The body itself is capped by main
+	// (ImportBodyLimit). On failure the token is unreadable, but re-showing the
+	// upload page changes nothing, so it needs no CSRF check.
 	if err := r.ParseMultipartForm(csvMaxBytes); err != nil {
 		c.uploadError(w, r, "Upload too large or malformed (max 5 MB).")
 		return
 	}
-	file, _, err := r.FormFile("file")
+	if !c.checkCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		c.uploadError(w, r, "Please choose a CSV file.")
 		return
 	}
 	defer file.Close()
+	if hdr.Size > csvMaxBytes { // refuse rather than silently import a truncated file
+		c.uploadError(w, r, "That file is over 5 MB — split it and import the parts.")
+		return
+	}
 	data, _ := io.ReadAll(io.LimitReader(file, csvMaxBytes))
 	delim := r.FormValue("delim")
 	records, err := csvRecords(string(data), delim)
@@ -296,7 +311,12 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	records, err := csvRecords(r.FormValue("csv"), r.FormValue("delim"))
+	raw := r.FormValue("csv")
+	if len(raw) > csvMaxBytes {
+		c.uploadError(w, r, "Upload too large (max 5 MB).")
+		return
+	}
+	records, err := csvRecords(raw, r.FormValue("delim"))
 	if err != nil || len(records) == 0 {
 		http.Redirect(w, r, "/transactions/import", http.StatusSeeOther)
 		return

@@ -1,11 +1,17 @@
 package controller
 
 import (
+	"bytes"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+
+	"lira/internal/model"
 )
 
 func TestParseCSVDate(t *testing.T) {
@@ -120,5 +126,40 @@ func TestImportCommitRejectsAmbiguousAmounts(t *testing.T) {
 	}
 	if got["Salary"] != 2000 || got["Rent"] != -900 {
 		t.Errorf("debit/credit import = %v, want Salary 2000 / Rent -900 (dash = blank)", got)
+	}
+}
+
+// multipartUpload builds a CSRF-valid import preview POST carrying `body` as the file.
+func multipartUpload(t *testing.T, body string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("csrf_token", "tok")
+	fw, _ := mw.CreateFormFile("file", "bank.csv")
+	_, _ = io.WriteString(fw, body)
+	_ = mw.Close()
+	r := httptest.NewRequest(http.MethodPost, "/transactions/import/preview", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	r.AddCookie(&http.Cookie{Name: csrfCookie, Value: "tok"})
+	return withUser(r, &model.Session{MFAPassed: true}, &model.User{ID: 1, Username: "a", Role: "admin"})
+}
+
+// A file over the 5 MB cap is refused with a message — never silently cut at
+// 5 MB (which dropped every later row, possibly mid-amount).
+func TestImportPreviewRejectsOversizedFile(t *testing.T) {
+	c, _ := testController(t)
+	row := "2026-10-01,Coffee,-3.50\n"
+	big := strings.Repeat(row, csvMaxBytes/len(row)+10)
+
+	w := httptest.NewRecorder()
+	c.ImportPreview(w, multipartUpload(t, big))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "over 5 MB") {
+		t.Errorf("oversized upload: status %d, want the over-5-MB message", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	c.ImportPreview(w, multipartUpload(t, "Date,Payee,Amount\n"+row))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "over 5 MB") || !strings.Contains(w.Body.String(), "Coffee") {
+		t.Errorf("small upload: status %d, want the mapping preview", w.Code)
 	}
 }
