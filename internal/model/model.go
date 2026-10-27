@@ -1514,21 +1514,23 @@ func TxDedupKey(date string, amount float64, payee string) string {
 	return fmt.Sprintf("%s|%.2f|%s", date, amount, strings.ToLower(strings.TrimSpace(payee)))
 }
 
-// AccountTxKeys returns the set of dedup keys for an account's transactions.
-func (s *Store) AccountTxKeys(accountID int64) (map[string]bool, error) {
+// AccountTxKeys counts an account's transactions per dedup key, so an import
+// can skip exactly as many copies as already exist (two identical coffees on
+// one day are two transactions, not one).
+func (s *Store) AccountTxKeys(accountID int64) (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT date, amount, payee FROM transactions WHERE account_id=?`, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	out := map[string]int{}
 	for rows.Next() {
 		var d, p string
 		var a float64
 		if err := rows.Scan(&d, &a, &p); err != nil {
 			return nil, err
 		}
-		out[TxDedupKey(d, a, p)] = true
+		out[TxDedupKey(d, a, p)]++
 	}
 	return out, rows.Err()
 }

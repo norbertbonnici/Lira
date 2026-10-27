@@ -163,3 +163,76 @@ func TestImportPreviewRejectsOversizedFile(t *testing.T) {
 		t.Errorf("small upload: status %d, want the mapping preview", w.Code)
 	}
 }
+
+func TestCSVSafe(t *testing.T) {
+	cases := map[string]string{
+		"=HYPERLINK(\"http://x\",\"hi\")": "'=HYPERLINK(\"http://x\",\"hi\")",
+		"+cmd|' /C calc'!A0":              "'+cmd|' /C calc'!A0",
+		"-2+3":                            "'-2+3",
+		"@SUM(A1)":                        "'@SUM(A1)",
+		"\tTab":                           "'\tTab",
+		"-12.50":                          "-12.50", // amounts stay numeric
+		"+3":                              "+3",
+		"12.50":                           "12.50",
+		"Lidl":                            "Lidl",
+		"":                                "",
+		"-":                               "'-",
+		"1.2.3":                           "1.2.3", // starts with a digit: not a formula
+	}
+	for in, want := range cases {
+		if got := csvSafe(in); got != want {
+			t.Errorf("csvSafe(%q) = %q want %q", in, got, want)
+		}
+	}
+}
+
+// Exports neutralise formula-looking payees but keep negative amounts numeric.
+func TestExportTransactionsEscapesFormulas(t *testing.T) {
+	c, store := testController(t)
+	_ = store.CreateAccount("Bank", "checking", "EUR", 0, false)
+	accts, _ := store.ListAccounts()
+	_ = store.CreateTransaction(accts[0].ID, "2026-10-01", -12.5, nil, `=HYPERLINK("http://evil","x")`, "@note")
+	w := httptest.NewRecorder()
+	c.ExportTransactions(w, httptest.NewRequest(http.MethodGet, "/export/transactions.csv", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `"'=HYPERLINK(""http://evil"",""x"")"`) || !strings.Contains(body, "'@note") {
+		t.Errorf("formula cells not escaped:\n%s", body)
+	}
+	if !strings.Contains(body, ",-12.50,") {
+		t.Errorf("amount should stay a plain number:\n%s", body)
+	}
+}
+
+// Duplicate detection counts copies: genuine repeats in a file are imported,
+// only as many as the account already holds are skipped, and re-importing the
+// same file adds nothing.
+func TestImportCommitCountsDuplicates(t *testing.T) {
+	c, store := testController(t)
+	_ = store.CreateAccount("Current", "checking", "EUR", 0, false)
+	accts, _ := store.ListAccounts()
+	acct := strconv.FormatInt(accts[0].ID, 10)
+	_ = store.CreateTransaction(accts[0].ID, "2026-10-01", -3.5, nil, "Cafe", "") // entered by hand
+
+	file := "2026-10-01,Cafe,-3.50\n2026-10-01,Cafe,-3.50\n2026-10-02,Shop,-20.00\n"
+	commit := func() {
+		v := url.Values{"csv": {file}, "delim": {","}, "account_id": {acct}, "date_layout": {"2006-01-02"},
+			"date_col": {"0"}, "payee_col": {"1"}, "amount_col": {"2"}, "skip_dupes": {"1"}}
+		c.ImportCommit(httptest.NewRecorder(), postForm("/transactions/import/commit", v))
+	}
+	count := func() map[string]int {
+		n := map[string]int{}
+		txs, _ := store.ListTransactions(100)
+		for _, tx := range txs {
+			n[tx.Payee]++
+		}
+		return n
+	}
+	commit()
+	if n := count(); n["Cafe"] != 2 || n["Shop"] != 1 {
+		t.Errorf("after first import: %v want Cafe 2 (1 by hand + 1 new), Shop 1", n)
+	}
+	commit()
+	if n := count(); n["Cafe"] != 2 || n["Shop"] != 1 {
+		t.Errorf("re-importing the same file added rows: %v", n)
+	}
+}

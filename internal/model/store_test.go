@@ -99,11 +99,12 @@ func TestDedupAndBackup(t *testing.T) {
 	if TxDedupKey("2026-05-10", -12.50, " lidl ") != TxDedupKey("2026-05-10", -12.5, "Lidl") {
 		t.Error("TxDedupKey should normalize payee case/space and amount")
 	}
+	_ = s.CreateTransaction(acct, "2026-05-10", -12.50, nil, "LIDL", "") // a genuine second one
 	keys, _ := s.AccountTxKeys(acct)
-	if !keys[TxDedupKey("2026-05-10", -12.50, "Lidl")] {
-		t.Errorf("existing tx key not found: %v", keys)
+	if n := keys[TxDedupKey("2026-05-10", -12.50, "Lidl")]; n != 2 {
+		t.Errorf("existing tx key count = %d want 2: %v", n, keys)
 	}
-	if keys[TxDedupKey("2026-05-11", -12.50, "Lidl")] {
+	if keys[TxDedupKey("2026-05-11", -12.50, "Lidl")] != 0 {
 		t.Error("non-existent key should be absent")
 	}
 

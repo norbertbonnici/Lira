@@ -185,8 +185,45 @@ func writeCSV(w http.ResponseWriter, filename string, header []string, rows [][]
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	_ = cw.Write(header)
+	for _, row := range rows {
+		for i := range row {
+			row[i] = csvSafe(row[i])
+		}
+	}
 	_ = cw.WriteAll(rows)
 	cw.Flush()
+}
+
+// csvSafe defuses spreadsheet formula injection: a text cell starting with
+// = + - @ (or a tab/CR) is run as a formula when the export is opened in Excel
+// or Sheets, and payees/notes come from bank CSVs, i.e. third-party text. Such
+// cells get a leading apostrophe (shown as text, not evaluated). Plain numbers
+// like "-12.50" are left alone so amounts stay numeric.
+func csvSafe(s string) string {
+	if s == "" || !strings.ContainsRune("=+-@\t\r", rune(s[0])) || isPlainNumber(s) {
+		return s
+	}
+	return "'" + s
+}
+
+// isPlainNumber reports a decimal like "-12.50" or "+3": sign, digits, at most
+// one dot — nothing a spreadsheet could read as a formula.
+func isPlainNumber(s string) bool {
+	if s[0] == '-' || s[0] == '+' {
+		s = s[1:]
+	}
+	digits, dots := 0, 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && dots <= 1
 }
 
 func f2(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
@@ -342,12 +379,15 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		catByName[strings.ToLower(ct.Name)] = ct.ID
 	}
 
-	// Duplicate detection: skip rows already in the account (and within this file).
+	// Duplicate detection: skip a row only while the account still holds an
+	// unmatched copy of it. Counting (not a yes/no set) keeps genuine repeats —
+	// two €3.50 coffees on one day — while re-importing the same file adds
+	// nothing.
 	skipDupes := r.FormValue("skip_dupes") != ""
-	seen := map[string]bool{}
+	existing := map[string]int{}
 	if skipDupes {
 		if keys, err := c.store.AccountTxKeys(accountID); err == nil {
-			seen = keys
+			existing = keys
 		}
 	}
 
@@ -406,13 +446,12 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		}
 		payee := get(row, payeeCol)
 		if skipDupes {
-			k := model.TxDedupKey(dateStr, amount, payee)
-			if seen[k] {
+			if k := model.TxDedupKey(dateStr, amount, payee); existing[k] > 0 {
+				existing[k]--
 				skipped++
 				reasons["Duplicate (already in account)"]++
 				continue
 			}
-			seen[k] = true
 		}
 		var catID *int64
 		if catCol >= 0 {
