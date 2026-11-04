@@ -32,6 +32,9 @@ type User struct {
 	FailedLogins int
 	LockedUntil  string // RFC3339 or ""
 	CreatedAt    string
+	// APIScope is the scope of the bearer token that authenticated this request
+	// (ScopeRead | ScopeWrite); empty for cookie sessions.
+	APIScope string
 }
 
 type Session struct {
@@ -648,6 +651,10 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	if err := s.ensureColumn("accounts", "spending", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Token scopes: existing tokens become read-only for the MCP write tools.
+	if err := s.ensureColumn("api_tokens", "scope", "TEXT NOT NULL DEFAULT 'read'"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("operating_costs", "category_id", "INTEGER REFERENCES categories(id) ON DELETE SET NULL"); err != nil {
@@ -2526,15 +2533,29 @@ type APIToken struct {
 	ID         int64
 	UserID     int64
 	Name       string
+	Scope      string // ScopeRead | ScopeWrite
 	CreatedAt  string
 	LastUsedAt string
 }
 
-// CreateAPIToken stores a new token's hash for a user.
-func (s *Store) CreateAPIToken(userID int64, name, tokenHash string) error {
+// Token scopes. ScopeWrite unlocks the MCP write tools (propose→apply);
+// tokens minted before scopes existed are ScopeRead. The /api/v1 REST
+// endpoints are NOT scope-gated (they predate scopes and the iOS app writes
+// through them with read tokens).
+const (
+	ScopeRead  = "read"
+	ScopeWrite = "write"
+)
+
+// CreateAPIToken stores a new token's hash for a user. Any scope other than
+// ScopeWrite is stored as ScopeRead.
+func (s *Store) CreateAPIToken(userID int64, name, tokenHash, scope string) error {
+	if scope != ScopeWrite {
+		scope = ScopeRead
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO api_tokens(user_id, name, token_hash, created_at) VALUES(?,?,?,?)`,
-		userID, name, tokenHash, nowRFC())
+		`INSERT INTO api_tokens(user_id, name, token_hash, scope, created_at) VALUES(?,?,?,?,?)`,
+		userID, name, tokenHash, scope, nowRFC())
 	return err
 }
 
@@ -2543,8 +2564,8 @@ func (s *Store) CreateAPIToken(userID int64, name, tokenHash string) error {
 func (s *Store) UserByAPITokenHash(tokenHash string) (*User, error) {
 	var u User
 	err := s.db.QueryRow(
-		`SELECT u.id, u.username, u.role FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=?`,
-		tokenHash).Scan(&u.ID, &u.Username, &u.Role)
+		`SELECT u.id, u.username, u.role, t.scope FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=?`,
+		tokenHash).Scan(&u.ID, &u.Username, &u.Role, &u.APIScope)
 	if err != nil {
 		return nil, err
 	}
@@ -2555,7 +2576,7 @@ func (s *Store) UserByAPITokenHash(tokenHash string) (*User, error) {
 // ListAPITokens returns a user's own tokens (never the secret), newest first.
 func (s *Store) ListAPITokens(userID int64) ([]APIToken, error) {
 	rows, err := s.db.Query(
-		`SELECT id, user_id, name, created_at, last_used_at FROM api_tokens WHERE user_id=? ORDER BY id DESC`, userID)
+		`SELECT id, user_id, name, scope, created_at, last_used_at FROM api_tokens WHERE user_id=? ORDER BY id DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -2563,7 +2584,7 @@ func (s *Store) ListAPITokens(userID int64) ([]APIToken, error) {
 	var out []APIToken
 	for rows.Next() {
 		var t APIToken
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scope, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

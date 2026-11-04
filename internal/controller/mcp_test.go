@@ -14,10 +14,19 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// mcpServer spins up /mcp over a fresh DB with two users, each holding a token.
+// mcpServer spins up /mcp over a fresh DB with two users, each holding a
+// read token (tok-alice, tok-bob) and a write token (tok-alice-w, tok-bob-w).
 func mcpServer(t *testing.T) (*httptest.Server, *model.Store) {
+	srv, store, _ := mcpServerDir(t)
+	return srv, store
+}
+
+// mcpServerDir is mcpServer that also returns the DB's directory (backups land
+// in <dir>/backups).
+func mcpServerDir(t *testing.T) (*httptest.Server, *model.Store, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/t.db?_pragma=foreign_keys(ON)")
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+dir+"/t.db?_pragma=foreign_keys(ON)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,16 +47,19 @@ func mcpServer(t *testing.T) (*httptest.Server, *model.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.CreateAPIToken(id, "test", hashToken("tok-"+name)); err != nil {
+		if err := store.CreateAPIToken(id, "test", hashToken("tok-"+name), model.ScopeRead); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateAPIToken(id, "test-w", hashToken("tok-"+name+"-w"), model.ScopeWrite); err != nil {
 			t.Fatal(err)
 		}
 	}
-	c := &Controller{store: store, cfg: config.Config{BaseURL: "https://lira.example"}}
+	c := &Controller{store: store, cfg: config.Config{BaseURL: "https://lira.example", DBPath: dir + "/t.db"}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", c.APIAuth(c.MCP))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, store
+	return srv, store, dir
 }
 
 type rpcResp struct {
@@ -112,19 +124,36 @@ func TestMCPProtocol(t *testing.T) {
 		t.Errorf("notification: status %d, want 202", res.StatusCode)
 	}
 
-	_, r = mcpPost(t, srv, "tok-alice", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	tools, _ := r.Result["tools"].([]any)
-	if len(tools) != len(mcpTools) {
-		t.Fatalf("tools/list returned %d tools", len(tools))
+	// A read token sees only the read tools, all annotated read-only; a write
+	// token sees every tool, with only the mutating ones not read-only.
+	readTools := 0
+	for _, tl := range mcpTools {
+		if tl.Scope != model.ScopeWrite {
+			readTools++
+		}
 	}
-	for _, tl := range tools {
-		m := tl.(map[string]any)
-		if s, _ := m["inputSchema"].(map[string]any); s["type"] != "object" {
-			t.Errorf("%v: inputSchema must be an object schema", m["name"])
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{{"tok-alice", readTools}, {"tok-alice-w", len(mcpTools)}} {
+		_, r = mcpPost(t, srv, tc.token, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+		tools, _ := r.Result["tools"].([]any)
+		if len(tools) != tc.want {
+			t.Fatalf("%s: tools/list returned %d tools, want %d", tc.token, len(tools), tc.want)
 		}
-		if ann, _ := m["annotations"].(map[string]any); ann["readOnlyHint"] != true {
-			t.Errorf("%v: should be annotated read-only", m["name"])
+		for _, tl := range tools {
+			m := tl.(map[string]any)
+			if s, _ := m["inputSchema"].(map[string]any); s["type"] != "object" {
+				t.Errorf("%v: inputSchema must be an object schema", m["name"])
+			}
+			wantRO := !findMCPTool(m["name"].(string)).Mutating
+			if ann, _ := m["annotations"].(map[string]any); ann["readOnlyHint"] != wantRO {
+				t.Errorf("%v: readOnlyHint=%v, want %v", m["name"], ann["readOnlyHint"], wantRO)
+			}
 		}
+	}
+	if readTools == len(mcpTools) || findMCPTool("apply_recategorization").Mutating != true {
+		t.Fatal("expected write-scoped, mutating tools to exist")
 	}
 
 	if _, r = mcpPost(t, srv, "tok-alice", `{"jsonrpc":"2.0","id":3,"method":"nope"}`); r.Error == nil || r.Error.Code != rpcMethodNotFound {
@@ -172,7 +201,7 @@ func TestMCPTools(t *testing.T) {
 	// Every tool runs on an empty ledger without error.
 	for _, tl := range mcpTools {
 		args := map[string]any{}
-		if tl.Name == "get_project" {
+		if tl.Name == "get_project" || tl.Scope == model.ScopeWrite {
 			continue
 		}
 		callTool(t, srv, "tok-alice", tl.Name, args, false)

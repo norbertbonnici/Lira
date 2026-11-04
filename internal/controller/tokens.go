@@ -1,6 +1,10 @@
 package controller
 
-import "net/http"
+import (
+	"net/http"
+
+	"lira/internal/model"
+)
 
 // API tokens are managed in the (admin) Settings page, but the endpoints stay
 // per-user (Protect, not AdminOnly) and scoped by currentUser, so the token list
@@ -19,7 +23,11 @@ func (c *Controller) TokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plain := "lira_" + raw
-	if err := c.store.CreateAPIToken(u.ID, r.FormValue("name"), hashToken(plain)); err != nil {
+	scope := model.ScopeRead
+	if r.FormValue("write") == "1" {
+		scope = model.ScopeWrite
+	}
+	if err := c.store.CreateAPIToken(u.ID, r.FormValue("name"), hashToken(plain), scope); err != nil {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}

@@ -11,7 +11,7 @@ Lira is a self-hosted personal-finance application built as one static Go binary
 - `internal/config/`: environment configuration; `internal/market/`: price and FX providers.
 - `deploy/`: deployment script and systemd unit. Tests live beside source as `*_test.go`.
 
-`/mcp` (`internal/controller/mcp.go`) is a read-only, stdlib-only MCP server for LLM clients, authenticated with the same bearer tokens as `/api/v1`; its pure audit helpers live in `internal/model/audit.go`.
+`/mcp` (`internal/controller/mcp.go`) is a stdlib-only MCP server for LLM clients, authenticated with the same bearer tokens as `/api/v1`; its pure audit helpers live in `internal/model/audit.go`. Tools are read-only unless the token has the `write` scope, which unlocks propose→apply write tools (`internal/controller/mcp_write.go`, `internal/model/changes.go`): proposals are single-use and owner-scoped, applies are audit-logged and back up the DB before batches.
 
 Keep dependencies flowing `main → controller → {model, view}`. Put SQL in model, presentation in view, and request handling in controller. Read `CLAUDE.md` for detailed domain constraints.
 
