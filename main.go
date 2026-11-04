@@ -120,6 +120,11 @@ func main() {
 	mux.HandleFunc("POST /api/v1/pocket", c.APIAuth(c.APICreatePocket))
 	mux.HandleFunc("DELETE /api/v1/pocket/{id}", c.APIAuth(c.APIDeletePocket))
 
+	// MCP server (read-only tools for LLM clients): same bearer-token auth as
+	// the JSON API. Any method is routed here; the handler answers POST and
+	// returns 405 for the rest (no SSE stream).
+	mux.HandleFunc("/mcp", c.APIAuth(c.MCP))
+
 	mux.HandleFunc("GET /reports", c.Protect(c.Reports))
 	mux.HandleFunc("GET /history", c.Protect(c.NavHistory))
 	mux.HandleFunc("GET /forecast", c.Protect(c.NavForecast))

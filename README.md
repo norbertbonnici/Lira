@@ -255,6 +255,55 @@ curl -H "Authorization: Bearer lira_xxx" -H "Content-Type: application/json" \
   https://lira.example.com/api/v1/transactions
 ```
 
+## MCP server (for Claude or a self-hosted LLM)
+
+Lira serves a [Model Context Protocol](https://modelcontextprotocol.io) endpoint
+at **`/mcp`** so an AI assistant can query your finances and audit the ledger.
+It uses the same personal bearer token as the JSON API (so pocket money stays
+private to the token's owner) and speaks MCP's Streamable HTTP transport
+(JSON responses, stateless, no SSE stream).
+
+**All tools are read-only.** The audit tools return candidates, and you fix them
+in the web app.
+
+| Tool | What it returns |
+|---|---|
+| `get_financial_summary` | net worth (cash/investments), monthly budget, this month's actuals + savings rate, bills due, budget alerts |
+| `list_accounts` / `list_categories` | balances; category ids + usage counts |
+| `search_transactions` | filtered ledger search (dates, account, category, uncategorized, text, amount range, income/expense, paging) |
+| `spending_by_category` / `monthly_totals` | spending breakdown; income/spend/net per month |
+| `list_holdings` | positions, EUR value, unrealized gain |
+| `list_projects` / `get_project` | budgets, spent/remaining, monthly commitment, loans, phases + items |
+| `list_operating_costs` | recurring costs (monthly EUR), next due date, budget vs actual |
+| `get_pocket` | **your** pocket-money balance + entries |
+| `find_duplicate_transactions` | same account + amount + payee on the same date (or within `windowDays`) |
+| `find_uncategorized_transactions` | uncategorized rows grouped by payee, with a category suggested from history |
+| `find_anomalies` | sign mismatches, outliers (an extra digit?), future-dated, zero amounts |
+
+Connect a client (use a token minted for this purpose, so you can revoke it on its own):
+
+```bash
+# Claude Code
+claude mcp add --transport http lira https://lira.example.com/mcp \
+  --header "Authorization: Bearer lira_xxx"
+```
+
+- **Clients that only take OAuth or stdio** (e.g. Claude Desktop): bridge with
+  `npx mcp-remote https://lira.example.com/mcp --header "Authorization: Bearer lira_xxx"`.
+- **Claude API**: pass the URL and token as an MCP server in the Messages API
+  (MCP connector). Anthropic's servers must be able to reach the URL, so it has
+  to be on public HTTPS (e.g. your Cloudflare tunnel).
+- **Self-hosted LLM**: any MCP-capable front end that supports Streamable HTTP
+  with a custom header (Open WebUI, LibreChat, LM Studio, ...). Nothing leaves
+  your network.
+
+Smoke test:
+
+```bash
+curl -H "Authorization: Bearer lira_xxx" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lira.example.com/mcp
+```
+
 ## Deploy on the ZimaBoard
 
 ```bash

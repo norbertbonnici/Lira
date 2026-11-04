@@ -27,20 +27,24 @@ type apiHandler func(http.ResponseWriter, *http.Request, *model.User)
 func (c *Controller) APIAuth(next apiHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		unauthorized := func(msg string) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="lira"`)
+			apiError(w, http.StatusUnauthorized, msg)
+		}
 		const prefix = "Bearer "
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, prefix) {
-			apiError(w, http.StatusUnauthorized, "missing bearer token")
+			unauthorized("missing bearer token")
 			return
 		}
 		tok := strings.TrimSpace(auth[len(prefix):])
 		if tok == "" {
-			apiError(w, http.StatusUnauthorized, "missing bearer token")
+			unauthorized("missing bearer token")
 			return
 		}
 		u, err := c.store.UserByAPITokenHash(hashToken(tok))
 		if err != nil || u == nil {
-			apiError(w, http.StatusUnauthorized, "invalid token")
+			unauthorized("invalid token")
 			return
 		}
 		next(w, r, u)

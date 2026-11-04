@@ -67,8 +67,10 @@ type Transaction struct {
 	ProjectID  sql.NullInt64
 	TransferID sql.NullInt64 // set on both legs of a transfer
 	// view-only joined fields
-	AccountName  string
-	CategoryName string
+	AccountName     string
+	CategoryName    string
+	AccountCurrency string // set by SearchTransactions
+	CategoryKind    string // income | expense | "" (set by SearchTransactions)
 }
 
 type Holding struct {

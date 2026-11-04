@@ -17,8 +17,9 @@ commands or conventions change.
 - `make linux` — cross-compile `./lira-linux-amd64` for the ZimaBoard (x86-64).
 - `make deploy LIRA_HOST=user@your-server` — `make linux` + roll out via
   `deploy/deploy.sh` (stop → swap → start, backup + auto-rollback on the host).
-- `go test ./...` — all tests (model: store + finance math; controller: TOTP RFC
-  vectors, plan/ledger helpers; view: every template parses + executes).
+- `go test ./...` — all tests (model: store + finance math + ledger audits;
+  controller: TOTP RFC vectors, plan/ledger helpers, MCP protocol + tools; view:
+  every template parses + executes).
 - `go test ./internal/controller -run TestStillToDraw` — run one test by name.
 - `go vet ./...` — vet.
 
@@ -385,6 +386,43 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
   marshaling); helpers `writeJSON`/`apiError`/`decodeJSON` (1 MB body cap).
 - Deferred (easy to add): edits/`PUT`, projects/costs writes, transfers, pagination.
   Served over TLS (Cloudflare/Caddy) — token + HTTPS is the whole model.
+
+## MCP server (`/mcp`, `controller/mcp.go`)
+A Model Context Protocol endpoint for LLM clients (Claude Code/Desktop, the Claude
+API MCP connector, self-hosted models via an MCP-capable front end). **Hand-rolled
+on the stdlib** (no SDK dependency): JSON-RPC 2.0 over MCP **Streamable HTTP, JSON
+-response flavour** — each POST gets one `application/json` reply, notifications/
+client responses get `202`, GET/other methods `405` (no SSE stream), stateless (no
+`Mcp-Session-Id`), batching rejected. Supported protocol revisions are
+`mcpProtocolVersions` (initialize echoes the client's if supported, else the
+latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must match
+`cfg.BaseURL` or the request host (spec-mandated DNS-rebinding guard).
+- Auth: routed as `mux.HandleFunc("/mcp", c.APIAuth(c.MCP))` — the same per-user
+  bearer token as `/api/v1` (401s carry `WWW-Authenticate: Bearer`), so `get_pocket`
+  only ever sees the token owner's pot.
+- **Every tool is read-only** (annotated `readOnlyHint`). Tools live in the
+  `mcpTools` table (name, description, JSON Schema via the `schema`/`sInt`/... helpers,
+  `Run`); args are validated by `mcpArgs` helpers and failures are returned in-band
+  (`isError: true`) so the model can correct itself; an unknown tool is a JSON-RPC
+  `-32602`. Results are an object, sent as both a JSON `text` block and
+  `structuredContent`; money is rounded to cents (`r2`).
+- Tools reuse the existing helpers (`budgetSummary`, `budgetAlerts`, `billsDue`,
+  `projectGroups`, `actualMonthlySaving`, `tracksBudget`) so numbers match the web
+  pages. `get_financial_summary` errors (not zeros) on a `ComputeNAV` failure.
+- Model support (`internal/model/audit.go`): `TxFilter` + `Store.SearchTransactions`/
+  `CountTransactions` (LIKE wildcards escaped; transfers excluded unless asked;
+  joins `AccountCurrency`/`CategoryKind` onto `Transaction`), and the pure, tested
+  audits `FindDuplicates(txs, windowDays)` (same account + cents + `TxDedupKey`-style
+  payee, clustered by date gap), `SuggestCategories` (uncategorized rows grouped by
+  `NormalizePayee` + sign, suggesting the payee's most-used category), and
+  `FindAnomalies` (sign_mismatch / outlier vs payee median / future_dated /
+  zero_amount). Audits read the **full** ledger (history informs medians and
+  suggestions) and the handlers filter findings by date range afterwards.
+- The server `instructions` tell the model that payee/notes text is untrusted
+  (bank/CSV-sourced), since it flows straight into the model's context.
+- Deferred: write tools (recategorize, delete duplicate, pay item) — would need
+  token scopes (`api_tokens.scope` via `ensureColumn`), a propose→apply flow, an
+  audit log, and a `Store.Backup` before batch changes.
 
 ## Auth & security model
 - **Invite-only.** Public `/register` works ONLY to create the first account =
