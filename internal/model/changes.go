@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -19,8 +20,11 @@ import (
 // else, was already applied, or has expired.
 var ErrProposalUnavailable = errors.New("proposal not found, expired, or already applied")
 
-// Proposal actions.
-const ActionRecategorize = "recategorize"
+// Proposal / audit actions.
+const (
+	ActionRecategorize   = "recategorize"
+	ActionCreateCategory = "create_category" // audit only: a category made by a recategorization proposal
+)
 
 // CreateProposal stores a plan for userID and returns its id and expiry.
 // Expired proposals that were never applied are pruned on the way.
@@ -52,10 +56,60 @@ func (s *Store) PendingProposal(userID int64, id, action string) ([]byte, error)
 
 // RecatChange is one proposed category change. From is the category the row
 // had when proposed (nil = uncategorized); To is the new one (nil = clear).
+// NewCat instead names a category the same proposal creates (To is nil until
+// apply resolves it).
 type RecatChange struct {
-	TxID int64  `json:"tx"`
-	From *int64 `json:"from"`
-	To   *int64 `json:"to"`
+	TxID   int64  `json:"tx"`
+	From   *int64 `json:"from"`
+	To     *int64 `json:"to"`
+	NewCat string `json:"newCat,omitempty"`
+}
+
+// NewCategory is a category a recategorization proposal creates on apply.
+type NewCategory struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"` // income | expense
+}
+
+// RecatPlan is a stored recategorization proposal: categories to create
+// first, then the per-transaction changes.
+type RecatPlan struct {
+	NewCategories []NewCategory `json:"newCategories,omitempty"`
+	Changes       []RecatChange `json:"changes"`
+}
+
+// DecodeRecatPlan reads a stored plan, accepting the original bare-array
+// payload (changes only) that proposals stored before NewCategories existed.
+func DecodeRecatPlan(payload []byte) (RecatPlan, error) {
+	var p RecatPlan
+	if len(payload) > 0 && payload[0] == '[' {
+		err := json.Unmarshal(payload, &p.Changes)
+		return p, err
+	}
+	err := json.Unmarshal(payload, &p)
+	return p, err
+}
+
+// CreatedCategory reports what apply did for one NewCategory: created it,
+// reused an identical (same name + kind) category that appeared meanwhile, or
+// failed (Reason set) because the name now belongs to the other kind.
+type CreatedCategory struct {
+	Name, Kind string
+	ID         int64
+	Reused     bool
+	Reason     string
+}
+
+// FindCategoryByName returns the category whose trimmed name matches
+// (case-insensitive), or sql.ErrNoRows.
+func (s *Store) FindCategoryByName(name string) (*Category, error) {
+	var c Category
+	err := s.db.QueryRow(`SELECT id, name, kind FROM categories WHERE lower(trim(name))=lower(trim(?)) ORDER BY id LIMIT 1`, name).
+		Scan(&c.ID, &c.Name, &c.Kind)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // RecatSkip is a change that was not applied, with why.
@@ -79,15 +133,19 @@ type AuditEntry struct {
 	At       string
 }
 
-// ApplyRecategorization claims proposal id for userID and applies its changes
-// in one transaction. A change applies only if the transaction still exists, is
-// not a transfer leg, still has its proposed-from category, and the target
-// category still exists; the rest are returned as skipped. Returns
-// ErrProposalUnavailable if the proposal can't be claimed (nothing changes).
-func (s *Store) ApplyRecategorization(userID int64, id, source string, changes []RecatChange) (applied []RecatChange, skipped []RecatSkip, err error) {
+// ApplyRecategorization claims proposal id for userID and applies its plan in
+// one transaction: first it creates plan.NewCategories (reusing an existing
+// category with the same name and kind; one whose name is now taken by the
+// other kind fails and its changes are skipped), then the changes. A change
+// applies only if the transaction still exists, is not a transfer leg, still
+// has its proposed-from category, and the target category still exists; the
+// rest are returned as skipped. Applied changes carry the resolved To.
+// Returns ErrProposalUnavailable if the proposal can't be claimed (nothing
+// changes).
+func (s *Store) ApplyRecategorization(userID int64, id, source string, plan RecatPlan) (applied []RecatChange, skipped []RecatSkip, created []CreatedCategory, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer tx.Rollback()
 	now := nowRFC()
@@ -95,12 +153,61 @@ func (s *Store) ApplyRecategorization(userID int64, id, source string, changes [
 		`UPDATE mcp_proposals SET applied_at=? WHERE id=? AND user_id=? AND action=? AND applied_at='' AND expires_at>?`,
 		now, id, userID, ActionRecategorize, now)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, nil, ErrProposalUnavailable
+		return nil, nil, nil, ErrProposalUnavailable
 	}
-	for _, ch := range changes {
+	audit := func(action, entity string, entityID int64, oldV, newV string) error {
+		_, err := tx.Exec(
+			`INSERT INTO audit_log(user_id, source, action, entity, entity_id, old_value, new_value, ref, created_at)
+			 VALUES(?,?,?,?,?,?,?,?,?)`,
+			userID, source, action, entity, entityID, oldV, newV, id, now)
+		return err
+	}
+
+	newIDs := map[string]int64{} // lower-cased name → id
+	for _, nc := range plan.NewCategories {
+		cc := CreatedCategory{Name: nc.Name, Kind: nc.Kind}
+		var exID int64
+		var exKind string
+		err := tx.QueryRow(`SELECT id, kind FROM categories WHERE lower(trim(name))=lower(trim(?)) ORDER BY id LIMIT 1`, nc.Name).
+			Scan(&exID, &exKind)
+		switch {
+		case err == nil && exKind == nc.Kind:
+			cc.ID, cc.Reused = exID, true
+		case err == nil:
+			cc.Reason = "a " + exKind + " category with that name was created meanwhile"
+		case errors.Is(err, sql.ErrNoRows):
+			r, err := tx.Exec(`INSERT INTO categories(name, kind) VALUES(?,?)`, nc.Name, nc.Kind)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if cc.ID, err = r.LastInsertId(); err != nil {
+				return nil, nil, nil, err
+			}
+			b, _ := json.Marshal(map[string]any{"categoryId": cc.ID, "category": nc.Name, "kind": nc.Kind})
+			if err := audit(ActionCreateCategory, "category", cc.ID, "null", string(b)); err != nil {
+				return nil, nil, nil, err
+			}
+		default:
+			return nil, nil, nil, err
+		}
+		if cc.ID != 0 {
+			newIDs[strings.ToLower(nc.Name)] = cc.ID
+		}
+		created = append(created, cc)
+	}
+
+	for _, ch := range plan.Changes {
+		if ch.NewCat != "" {
+			cid, ok := newIDs[strings.ToLower(ch.NewCat)]
+			if !ok {
+				skipped = append(skipped, RecatSkip{ch.TxID, "new category \"" + ch.NewCat + "\" could not be created"})
+				continue
+			}
+			ch.To, ch.NewCat = &cid, ""
+		}
 		var from, to any
 		if ch.From != nil {
 			from = *ch.From
@@ -114,7 +221,7 @@ func (s *Store) ApplyRecategorization(userID int64, id, source string, changes [
 			   AND (? IS NULL OR EXISTS(SELECT 1 FROM categories WHERE id=?))`,
 			to, ch.TxID, from, to, to)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
 			skipped = append(skipped, RecatSkip{ch.TxID, "changed since it was proposed (category edited, transaction deleted, or target category removed)"})
@@ -122,24 +229,21 @@ func (s *Store) ApplyRecategorization(userID int64, id, source string, changes [
 		}
 		oldV, err := categoryJSON(tx, ch.From)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		newV, err := categoryJSON(tx, ch.To)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO audit_log(user_id, source, action, entity, entity_id, old_value, new_value, ref, created_at)
-			 VALUES(?,?,?,?,?,?,?,?,?)`,
-			userID, source, ActionRecategorize, "transaction", ch.TxID, oldV, newV, id, now); err != nil {
-			return nil, nil, err
+		if err := audit(ActionRecategorize, "transaction", ch.TxID, oldV, newV); err != nil {
+			return nil, nil, nil, err
 		}
 		applied = append(applied, ch)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return applied, skipped, nil
+	return applied, skipped, created, nil
 }
 
 // categoryJSON renders a category reference for the audit log, keeping the

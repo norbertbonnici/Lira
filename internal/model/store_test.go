@@ -1785,7 +1785,7 @@ func TestApplyRecategorizationOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			applied, _, err := s.ApplyRecategorization(uid, id, "test", changes)
+			applied, _, _, err := s.ApplyRecategorization(uid, id, "test", RecatPlan{Changes: changes})
 			if err == nil && len(applied) == 1 {
 				mu.Lock()
 				wins++
@@ -1799,5 +1799,123 @@ func TestApplyRecategorizationOnce(t *testing.T) {
 	}
 	if log, _ := s.ListAuditLog(10); len(log) != 1 {
 		t.Fatalf("audit entries = %d, want 1", len(log))
+	}
+}
+
+func TestDecodeRecatPlan(t *testing.T) {
+	p, err := DecodeRecatPlan([]byte(`[{"tx":3,"from":null,"to":5}]`))
+	if err != nil || len(p.Changes) != 1 || p.Changes[0].TxID != 3 || *p.Changes[0].To != 5 || len(p.NewCategories) != 0 {
+		t.Fatalf("legacy payload: %+v %v", p, err)
+	}
+	p, err = DecodeRecatPlan([]byte(`{"newCategories":[{"name":"Home","kind":"expense"}],"changes":[{"tx":4,"from":null,"to":null,"newCat":"Home"}]}`))
+	if err != nil || len(p.NewCategories) != 1 || p.Changes[0].NewCat != "Home" {
+		t.Fatalf("plan payload: %+v %v", p, err)
+	}
+}
+
+func TestApplyRecategorizationNewCategories(t *testing.T) {
+	s := testStore(t)
+	uid, err := s.CreateUser("alice", "h", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAccount("Main", "current", "EUR", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	accts, _ := s.ListAccounts()
+	for _, p := range []string{"Tiles", "Blinds", "Course"} {
+		if err := s.CreateTransaction(accts[0].ID, "2026-01-01", -10, nil, p, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	txs, _ := s.SearchTransactions(TxFilter{})
+	tx := map[string]int64{}
+	for _, x := range txs {
+		tx[x.Payee] = x.ID
+	}
+	plan := RecatPlan{
+		NewCategories: []NewCategory{{"Home", "expense"}, {"Gifts", "expense"}, {"Education", "expense"}},
+		Changes: []RecatChange{
+			{TxID: tx["Tiles"], NewCat: "Home"}, {TxID: tx["Blinds"], NewCat: "home"}, {TxID: tx["Course"], NewCat: "Education"},
+		},
+	}
+	id, _, err := s.CreateProposal(uid, ActionRecategorize, []byte(`{}`), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Between propose and apply, someone adds "gifts" (same kind → reused) and
+	// "Education" as INCOME (other kind → creation fails, its change skipped).
+	if err := s.CreateCategory("gifts", "expense"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateCategory(" Education ", "income"); err != nil {
+		t.Fatal(err)
+	}
+	applied, skipped, created, err := s.ApplyRecategorization(uid, id, "test", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 2 || len(skipped) != 1 || skipped[0].TxID != tx["Course"] || len(created) != 3 {
+		t.Fatalf("applied=%+v skipped=%+v created=%+v", applied, skipped, created)
+	}
+	if created[0].ID == 0 || created[0].Reused || !created[1].Reused || created[2].Reason == "" || created[2].ID != 0 {
+		t.Fatalf("created: %+v", created)
+	}
+	home := created[0].ID
+	for _, p := range []string{"Tiles", "Blinds"} {
+		if x, _ := s.GetTransaction(tx[p]); x.CategoryID.Int64 != home {
+			t.Errorf("%s not filed under Home: %+v", p, x.CategoryID)
+		}
+	}
+	for _, a := range applied {
+		if a.To == nil || *a.To != home || a.NewCat != "" {
+			t.Errorf("applied change not resolved: %+v", a)
+		}
+	}
+	if c, err := s.FindCategoryByName("HOME"); err != nil || c.ID != home {
+		t.Errorf("FindCategoryByName: %+v %v", c, err)
+	}
+	// 1 category creation + 2 recategorizations logged.
+	log, _ := s.ListAuditLog(10)
+	kinds := map[string]int{}
+	for _, e := range log {
+		kinds[e.Action]++
+	}
+	if kinds[ActionCreateCategory] != 1 || kinds[ActionRecategorize] != 2 {
+		t.Fatalf("audit: %+v", kinds)
+	}
+}
+
+func TestProjectHints(t *testing.T) {
+	cat := func(id int64, name string) (sql.NullInt64, string) {
+		return sql.NullInt64{Int64: id, Valid: true}, name
+	}
+	p := func(id int64) sql.NullInt64 { return sql.NullInt64{Int64: id, Valid: true} }
+	c1, n1 := cat(1, "Home")
+	c2, n2 := cat(2, "Other")
+	txs := []Transaction{
+		{ID: 1, Amount: -10, ProjectID: p(7), CategoryID: c1, CategoryName: n1},
+		{ID: 2, Amount: -20, ProjectID: p(7), CategoryID: c1, CategoryName: n1},
+		{ID: 3, Amount: -5, ProjectID: p(7), CategoryID: c2, CategoryName: n2},
+		{ID: 4, Amount: -5, ProjectID: p(7)},                                          // uncategorized: no vote
+		{ID: 5, Amount: 50, ProjectID: p(7), CategoryID: c2, CategoryName: n2},        // positive: own bucket
+		{ID: 6, Amount: -9, DepositProjectID: p(8), CategoryID: c2, CategoryName: n2}, // deposit links project 8
+		{ID: 7, Amount: -9, ProjectID: p(9), CategoryID: c1, TransferID: p(1)},        // transfer leg ignored
+	}
+	h := ProjectHints(txs)
+	if got := h[7][false]; got.CategoryID != 1 || got.Basis != 3 || got.Confidence != 0.67 {
+		t.Errorf("project 7 spend: %+v", got)
+	}
+	if got := h[7][true]; got.CategoryID != 2 || got.Basis != 1 {
+		t.Errorf("project 7 income: %+v", got)
+	}
+	if got := h[8][false]; got.CategoryID != 2 {
+		t.Errorf("deposit project: %+v", got)
+	}
+	if _, ok := h[9]; ok {
+		t.Error("transfer leg should not produce a hint")
+	}
+	if TxProject(txs[5]) != 8 || TxProject(Transaction{}) != 0 {
+		t.Error("TxProject")
 	}
 }

@@ -74,10 +74,13 @@ func (f TxFilter) where() (string, []any) {
 func (s *Store) SearchTransactions(f TxFilter) ([]Transaction, error) {
 	where, args := f.where()
 	q := `SELECT t.id, t.account_id, t.date, t.amount, t.category_id, t.payee, t.notes, t.project_id, t.transfer_id,
-	             a.name, a.currency, COALESCE(c.name,''), COALESCE(c.kind,'')
+	             a.name, a.currency, COALESCE(c.name,''), COALESCE(c.kind,''),
+	             t.project_item_id, t.deposit_project_id, COALESCE(p.name,''), COALESCE(pi.name,'')
 	      FROM transactions t
 	      JOIN accounts a ON a.id = t.account_id
-	      LEFT JOIN categories c ON c.id = t.category_id` + where + `
+	      LEFT JOIN categories c ON c.id = t.category_id
+	      LEFT JOIN projects p ON p.id = COALESCE(t.project_id, t.deposit_project_id)
+	      LEFT JOIN project_items pi ON pi.id = t.project_item_id` + where + `
 	      ORDER BY t.date DESC, t.id DESC`
 	if f.Limit > 0 {
 		q += ` LIMIT ? OFFSET ?`
@@ -92,7 +95,8 @@ func (s *Store) SearchTransactions(f TxFilter) ([]Transaction, error) {
 	for rows.Next() {
 		var t Transaction
 		if err := rows.Scan(&t.ID, &t.AccountID, &t.Date, &t.Amount, &t.CategoryID, &t.Payee, &t.Notes,
-			&t.ProjectID, &t.TransferID, &t.AccountName, &t.AccountCurrency, &t.CategoryName, &t.CategoryKind); err != nil {
+			&t.ProjectID, &t.TransferID, &t.AccountName, &t.AccountCurrency, &t.CategoryName, &t.CategoryKind,
+			&t.ProjectItemID, &t.DepositProjectID, &t.ProjectName, &t.ItemName); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -307,6 +311,71 @@ func SuggestCategories(txs []Transaction) []UncategorizedGroup {
 		}
 		return math.Abs(out[i].Total) > math.Abs(out[j].Total)
 	})
+	return out
+}
+
+// TxProject is the project a transaction is linked to (item payment, loan
+// deposit, or plain project tag), 0 = none. Pure.
+func TxProject(t Transaction) int64 {
+	switch {
+	case t.ProjectID.Valid:
+		return t.ProjectID.Int64
+	case t.DepositProjectID.Valid:
+		return t.DepositProjectID.Int64
+	}
+	return 0
+}
+
+// ProjectHint is the category most often used by a project's categorized
+// transactions of one sign: a fallback suggestion for its uncategorized ones.
+type ProjectHint struct {
+	CategoryID int64
+	Category   string
+	Confidence float64 // share of that history using CategoryID
+	Basis      int     // categorized rows in that history
+}
+
+// ProjectHints maps project id → sign (true = positive) → the most-used
+// category among that project's categorized, non-transfer transactions.
+// Pure.
+func ProjectHints(txs []Transaction) map[int64]map[bool]ProjectHint {
+	type key struct {
+		project int64
+		pos     bool
+	}
+	counts := map[key]map[int64]int{}
+	names := map[int64]string{}
+	totals := map[key]int{}
+	for _, t := range txs {
+		pid := TxProject(t)
+		if pid == 0 || t.TransferID.Valid || !t.CategoryID.Valid {
+			continue
+		}
+		k := key{pid, t.Amount > 0}
+		if counts[k] == nil {
+			counts[k] = map[int64]int{}
+		}
+		counts[k][t.CategoryID.Int64]++
+		names[t.CategoryID.Int64] = t.CategoryName
+		totals[k]++
+	}
+	out := map[int64]map[bool]ProjectHint{}
+	for k, cs := range counts {
+		var best int64
+		bestN := 0
+		for id, n := range cs {
+			if n > bestN || (n == bestN && id < best) {
+				best, bestN = id, n
+			}
+		}
+		if out[k.project] == nil {
+			out[k.project] = map[bool]ProjectHint{}
+		}
+		out[k.project][k.pos] = ProjectHint{
+			CategoryID: best, Category: names[best], Basis: totals[k],
+			Confidence: math.Round(float64(bestN)/float64(totals[k])*100) / 100,
+		}
+	}
 	return out
 }
 

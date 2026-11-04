@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"lira/internal/model"
 )
@@ -23,15 +25,68 @@ import (
 
 const (
 	maxRecatChanges     = 500
+	maxNewCategories    = 20
+	maxCategoryName     = 60
 	proposalTTL         = 30 * time.Minute
 	preChangeBackupKeep = 10 // newest pre-change backups kept on disk
 	auditSourceMCP      = "mcp"
 )
 
+// parseNewCategories validates propose_recategorization's newCategories:
+// trimmed, non-empty, unique (case-insensitive) names that don't already
+// exist, each with kind income|expense. Keyed by lower-cased name.
+func parseNewCategories(raw any, existing []model.Category) ([]model.NewCategory, map[string]model.NewCategory, error) {
+	byName := map[string]model.NewCategory{}
+	if raw == nil {
+		return nil, byName, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, nil, errors.New("newCategories must be an array")
+	}
+	if len(list) > maxNewCategories {
+		return nil, nil, fmt.Errorf("at most %d new categories per proposal", maxNewCategories)
+	}
+	taken := map[string]model.Category{}
+	for _, ct := range existing {
+		taken[strings.ToLower(strings.TrimSpace(ct.Name))] = ct
+	}
+	var out []model.NewCategory
+	for i, el := range list {
+		m, ok := el.(map[string]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("newCategories[%d] must be an object", i)
+		}
+		name, _ := m["name"].(string)
+		name = strings.Join(strings.Fields(name), " ")
+		if name == "" || utf8.RuneCountInString(name) > maxCategoryName {
+			return nil, nil, fmt.Errorf("newCategories[%d].name must be 1-%d characters", i, maxCategoryName)
+		}
+		kind, _ := m["kind"].(string)
+		if kind != "income" && kind != "expense" {
+			return nil, nil, fmt.Errorf("newCategories[%d].kind must be income or expense", i)
+		}
+		key := strings.ToLower(name)
+		if ct, ok := taken[key]; ok {
+			return nil, nil, fmt.Errorf("category %q already exists (id %d, %s) — use its categoryId", ct.Name, ct.ID, ct.Kind)
+		}
+		if _, dup := byName[key]; dup {
+			return nil, nil, fmt.Errorf("new category %q is listed more than once", name)
+		}
+		nc := model.NewCategory{Name: name, Kind: kind}
+		byName[key] = nc
+		out = append(out, nc)
+	}
+	return out, byName, nil
+}
+
 func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, error) {
-	raw, ok := a["changes"].([]any)
-	if !ok || len(raw) == 0 {
-		return nil, errors.New("changes must be a non-empty array")
+	var raw []any
+	if v, present := a["changes"]; present && v != nil {
+		var ok bool
+		if raw, ok = v.([]any); !ok {
+			return nil, errors.New("changes must be an array")
+		}
 	}
 	if len(raw) > maxRecatChanges {
 		return nil, fmt.Errorf("at most %d changes per proposal", maxRecatChanges)
@@ -39,6 +94,13 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 	cats, err := c.store.ListCategories()
 	if err != nil {
 		return nil, errors.New("could not load categories")
+	}
+	newCats, newByName, err := parseNewCategories(a["newCategories"], cats)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 && len(newCats) == 0 {
+		return nil, errors.New("give at least one change or new category")
 	}
 	byID := make(map[int64]model.Category, len(cats))
 	for _, ct := range cats {
@@ -58,6 +120,7 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 		skipped = append(skipped, map[string]any{"transactionId": id, "reason": why})
 	}
 	seen := map[int64]bool{}
+	used := map[string]int{} // new category key → changes using it
 	for i, el := range raw {
 		m, ok := el.(map[string]any)
 		if !ok {
@@ -73,12 +136,25 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 			return nil, fmt.Errorf("transaction %d appears more than once", id)
 		}
 		seen[id] = true
-		cv, present := m["categoryId"]
-		if !present {
-			return nil, fmt.Errorf("changes[%d].categoryId is required (null clears the category)", i)
+		cv, hasID := m["categoryId"]
+		nv, hasNew := m["newCategory"]
+		if hasID && hasNew {
+			return nil, fmt.Errorf("changes[%d]: give categoryId or newCategory, not both", i)
+		}
+		if !hasID && !hasNew {
+			return nil, fmt.Errorf("changes[%d].categoryId is required (null clears the category), or newCategory to use a category from newCategories", i)
 		}
 		var to *int64
-		if cv != nil {
+		var newCat *model.NewCategory
+		switch {
+		case hasNew:
+			name, _ := nv.(string)
+			nc, ok := newByName[strings.ToLower(strings.Join(strings.Fields(name), " "))]
+			if !ok {
+				return nil, fmt.Errorf("changes[%d].newCategory %q is not in newCategories", i, name)
+			}
+			newCat = &nc
+		case cv != nil:
 			n, err := ca.integer("categoryId", 0, 1, math.MaxInt32)
 			if err != nil || n == 0 {
 				return nil, fmt.Errorf("changes[%d].categoryId must be a positive integer or null", i)
@@ -108,7 +184,7 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 			v := t.CategoryID.Int64
 			from = &v
 		}
-		if (from == nil && to == nil) || (from != nil && to != nil && *from == *to) {
+		if newCat == nil && ((from == nil && to == nil) || (from != nil && to != nil && *from == *to)) {
 			skip(id, "already in that category")
 			continue
 		}
@@ -116,25 +192,40 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 			"transactionId": id, "date": t.Date, "payee": t.Payee, "amount": r2(t.Amount),
 			"fromCategory": catName(from), "toCategory": catName(to),
 		}
-		if to != nil {
-			switch k := byID[*to].Kind; {
-			case k == "expense" && t.Amount > 0:
-				row["warning"] = "positive amount (income/refund) into an expense category"
-			case k == "income" && t.Amount < 0:
-				row["warning"] = "negative amount (spending) into an income category"
-			}
+		kind := ""
+		switch {
+		case newCat != nil:
+			row["toCategory"], row["newCategory"] = newCat.Name, true
+			kind = newCat.Kind
+		case to != nil:
+			kind = byID[*to].Kind
+		}
+		switch {
+		case kind == "expense" && t.Amount > 0:
+			row["warning"] = "positive amount (income/refund) into an expense category"
+		case kind == "income" && t.Amount < 0:
+			row["warning"] = "negative amount (spending) into an income category"
 		}
 		preview = append(preview, row)
-		changes = append(changes, model.RecatChange{TxID: id, From: from, To: to})
+		ch := model.RecatChange{TxID: id, From: from, To: to}
+		if newCat != nil {
+			ch.NewCat = newCat.Name
+			used[strings.ToLower(newCat.Name)]++
+		}
+		changes = append(changes, ch)
 	}
 
-	out := map[string]any{"changes": len(changes), "preview": preview, "skipped": skipped}
-	if len(changes) == 0 {
+	newPreview := make([]map[string]any, 0, len(newCats))
+	for _, nc := range newCats {
+		newPreview = append(newPreview, map[string]any{"name": nc.Name, "kind": nc.Kind, "transactions": used[strings.ToLower(nc.Name)]})
+	}
+	out := map[string]any{"changes": len(changes), "preview": preview, "skipped": skipped, "newCategories": newPreview}
+	if len(changes) == 0 && len(newCats) == 0 {
 		out["proposalId"] = nil
 		out["message"] = "Nothing to apply — every change was skipped."
 		return out, nil
 	}
-	payload, err := json.Marshal(changes)
+	payload, err := json.Marshal(model.RecatPlan{NewCategories: newCats, Changes: changes})
 	if err != nil {
 		return nil, errors.New("could not encode proposal")
 	}
@@ -143,7 +234,7 @@ func (c *Controller) mcpProposeRecat(u *model.User, a mcpArgs) (map[string]any, 
 		return nil, errors.New("could not store proposal")
 	}
 	out["proposalId"], out["expiresAt"] = id, exp
-	out["next"] = "Nothing has changed yet. Show this preview to the user and call apply_recategorization with this proposalId only if they approve it."
+	out["next"] = "Nothing has changed yet. Show this preview (including any new categories) to the user and call apply_recategorization with this proposalId only if they approve it."
 	return out, nil
 }
 
@@ -159,17 +250,17 @@ func (c *Controller) mcpApplyRecat(u *model.User, a mcpArgs) (map[string]any, er
 		}
 		return nil, errors.New("could not load proposal")
 	}
-	var changes []model.RecatChange
-	if err := json.Unmarshal(payload, &changes); err != nil {
+	plan, err := model.DecodeRecatPlan(payload)
+	if err != nil {
 		return nil, errors.New("proposal is corrupt")
 	}
 	backup := ""
-	if len(changes) > 1 {
+	if len(plan.Changes)+len(plan.NewCategories) > 1 {
 		if backup, err = c.preChangeBackup(id); err != nil {
 			return nil, errors.New("refusing to apply: could not write the pre-change database backup")
 		}
 	}
-	applied, skips, err := c.store.ApplyRecategorization(u.ID, id, auditSourceMCP, changes)
+	applied, skips, created, err := c.store.ApplyRecategorization(u.ID, id, auditSourceMCP, plan)
 	if err != nil {
 		if errors.Is(err, model.ErrProposalUnavailable) {
 			return nil, err
@@ -189,6 +280,23 @@ func (c *Controller) mcpApplyRecat(u *model.User, a mcpArgs) (map[string]any, er
 	out := map[string]any{
 		"proposalId": id, "applied": len(applied), "appliedTransactionIds": ids, "skipped": skipped,
 		"undoChanges": undo,
+	}
+	if len(created) > 0 {
+		cs := make([]map[string]any, 0, len(created))
+		for _, cc := range created {
+			row := map[string]any{"name": cc.Name, "kind": cc.Kind}
+			switch {
+			case cc.Reason != "":
+				row["created"], row["reason"] = false, cc.Reason
+			case cc.Reused:
+				row["categoryId"], row["created"], row["reason"] = cc.ID, false, "an identical category already existed; reused it"
+			default:
+				row["categoryId"], row["created"] = cc.ID, true
+			}
+			cs = append(cs, row)
+		}
+		out["newCategories"] = cs
+		out["undoNote"] = "undoChanges restores the transactions; new categories stay — delete them on the Lira Categories page if unwanted."
 	}
 	if backup != "" {
 		out["backup"] = backup
