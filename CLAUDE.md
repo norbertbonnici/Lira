@@ -496,10 +496,24 @@ latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must ma
   **one DB transaction**, each conditional on `category_id IS <proposed-from>` so a
   human edit made after the proposal is skipped, not overwritten; each applied row
   gets an `audit_log` entry (old/new as JSON with the category name at the time).
-  The result returns `undoChanges` (feed back into propose). `list_recent_changes`
+  The result returns `undoChanges` (feed back into propose). A proposal can also
+  **create categories**: `newCategories: [{name, kind}]` (≤20; whitespace-folded,
+  case-insensitively unique, must not already exist — the error names the existing
+  id) and changes point at one by name with `newCategory` instead of `categoryId`
+  (a proposal may just create categories). The stored payload is a
+  `model.RecatPlan` (`DecodeRecatPlan` still reads the original bare-array form);
+  apply creates them first in the same DB transaction (audit action
+  `create_category`), reusing an identical same-kind category that appeared
+  meanwhile, and skipping the changes of one whose name is now taken by the other
+  kind. Undo restores transactions only — created categories stay.
+  `find_uncategorized_transactions` adds per-group `projectLinks` (item payment /
+  loan deposit / project tag, via the project fields `SearchTransactions` now joins
+  onto `Transaction`) with a fallback suggestion from the pure `model.ProjectHints`
+  (the project's most-used category per sign); `txJSON` carries the same links.
+  `list_recent_changes`
   (read scope) exposes the audit log. The server `instructions` tell the model to
   apply only after the user explicitly approves that proposal.
-- Deferred: more write tools (delete duplicate, pay item) — reuse the proposal +
+- Deferred: more write tools (delete duplicate, pay item, link transfer) — reuse the proposal +
   audit plumbing (new `Action*` const, a `Store.Apply*` that claims + applies +
   audits in one tx); a web page for the audit log.
 

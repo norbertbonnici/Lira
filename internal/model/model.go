@@ -75,6 +75,13 @@ type Transaction struct {
 	CategoryName    string
 	AccountCurrency string // set by SearchTransactions
 	CategoryKind    string // income | expense | "" (set by SearchTransactions)
+	// Project links (set by SearchTransactions): an item payment carries
+	// ProjectItemID, a loan-deposit payment DepositProjectID. ProjectName is
+	// the project behind ProjectID or DepositProjectID; ItemName the item's.
+	ProjectItemID    sql.NullInt64
+	DepositProjectID sql.NullInt64
+	ProjectName      string
+	ItemName         string
 }
 
 type Holding struct {
@@ -1944,9 +1951,10 @@ func (s *Store) PayLoanDeposit(projectID, accountID int64, date string, amount f
 // the payment history in the detail page's deposit panel.
 func (s *Store) ListDepositPayments(projectID int64) ([]Transaction, error) {
 	rows, err := s.db.Query(`
-		SELECT t.id, t.account_id, t.date, t.amount, a.name
+		SELECT t.id, t.account_id, t.date, t.amount, t.category_id, t.payee, t.notes, a.name, COALESCE(c.name,'')
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id
+		LEFT JOIN categories c ON c.id = t.category_id
 		WHERE t.deposit_project_id = ?
 		ORDER BY t.date DESC, t.id DESC`, projectID)
 	if err != nil {
@@ -1956,7 +1964,8 @@ func (s *Store) ListDepositPayments(projectID int64) ([]Transaction, error) {
 	var out []Transaction
 	for rows.Next() {
 		var t Transaction
-		if err := rows.Scan(&t.ID, &t.AccountID, &t.Date, &t.Amount, &t.AccountName); err != nil {
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Date, &t.Amount, &t.CategoryID, &t.Payee, &t.Notes,
+			&t.AccountName, &t.CategoryName); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

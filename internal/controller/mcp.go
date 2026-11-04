@@ -469,7 +469,9 @@ var mcpTools = []mcpTool{
 	},
 	{
 		Name: "find_uncategorized_transactions", Title: "Audit: uncategorized",
-		Description: "Uncategorized transactions grouped by payee, each with a suggested category learned from how the same payee is categorized elsewhere in the ledger (with a confidence share and the size of that history).",
+		Description: "Uncategorized transactions grouped by payee, each with a suggested category learned from how the same payee is categorized elsewhere in the ledger (with a confidence share and the size of that history). " +
+			"projectLinks lists rows already tied to a project (item payment, loan deposit, or project tag) — that money is tracked by the project whatever its category — " +
+			"with the category the project's other transactions mostly use, as a fallback suggestion.",
 		Schema: schema(props{
 			"from":  sDate("Earliest date, inclusive"),
 			"to":    sDate("Latest date, inclusive"),
@@ -499,26 +501,41 @@ var mcpTools = []mcpTool{
 		Name: "propose_recategorization", Title: "Propose recategorization",
 		Description: "Plan category changes for transactions — CHANGES NOTHING. Validates each change and returns a preview (payee, amount, from → to category, warnings such as an expense category on a positive amount) " +
 			"plus a proposalId valid for 30 minutes. Show the preview to the user; only after they approve, call apply_recategorization. " +
-			"Ids typically come from find_uncategorized_transactions / search_transactions and list_categories. categoryId null removes the category.",
+			"Ids typically come from find_uncategorized_transactions / search_transactions and list_categories. categoryId null removes the category. " +
+			"When no existing category fits, list it in newCategories and point changes at it by name with newCategory instead of categoryId; " +
+			"the category is created only when the proposal is applied (a proposal may also just create categories).",
 		Schema: schema(props{
-			"changes": map[string]any{
-				"type": "array", "minItems": 1, "maxItems": maxRecatChanges,
-				"description": "The changes to plan",
+			"newCategories": map[string]any{
+				"type": "array", "maxItems": maxNewCategories,
+				"description": "Categories to create on apply (names must not already exist — use list_categories)",
 				"items": map[string]any{
-					"type": "object", "additionalProperties": false, "required": []string{"transactionId", "categoryId"},
+					"type": "object", "additionalProperties": false, "required": []string{"name", "kind"},
 					"properties": map[string]any{
-						"transactionId": sInt("Transaction id", 1, math.MaxInt32),
-						"categoryId":    map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "New category id, or null to clear"},
+						"name": map[string]any{"type": "string", "minLength": 1, "maxLength": maxCategoryName, "description": "Category name"},
+						"kind": sEnum("income for money in, expense for spending", "income", "expense"),
 					},
 				},
 			},
-		}, "changes"),
+			"changes": map[string]any{
+				"type": "array", "maxItems": maxRecatChanges,
+				"description": "The changes to plan; each needs categoryId or newCategory",
+				"items": map[string]any{
+					"type": "object", "additionalProperties": false, "required": []string{"transactionId"},
+					"properties": map[string]any{
+						"transactionId": sInt("Transaction id", 1, math.MaxInt32),
+						"categoryId":    map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "description": "New category id, or null to clear"},
+						"newCategory":   sStr("Name of a category from newCategories (instead of categoryId)"),
+					},
+				},
+			},
+		}),
 		Run:   (*Controller).mcpProposeRecat,
 		Scope: model.ScopeWrite,
 	},
 	{
 		Name: "apply_recategorization", Title: "Apply recategorization",
 		Description: "Apply a proposal from propose_recategorization. ONLY call after the user explicitly approved that proposal. " +
+			"Creates the proposal's newCategories first (reusing an identical one that appeared meanwhile). " +
 			"Applies once; rows edited since the proposal are skipped, not overwritten. A batch first writes a database backup on the server. Every change is audit-logged; the result includes the reverse changes for undo.",
 		Schema:   schema(props{"proposalId": sStr("The proposalId returned by propose_recategorization")}, "proposalId"),
 		Run:      (*Controller).mcpApplyRecat,
@@ -536,6 +553,15 @@ func txJSON(t model.Transaction) map[string]any {
 		"accountId": t.AccountID, "account": t.AccountName,
 		"categoryId": nptr(t.CategoryID), "category": t.CategoryName,
 		"projectId": nptr(t.ProjectID), "transfer": t.TransferID.Valid,
+	}
+	if t.ProjectName != "" {
+		m["project"] = t.ProjectName
+	}
+	if t.ProjectItemID.Valid {
+		m["projectItemId"], m["projectItem"] = t.ProjectItemID.Int64, t.ItemName
+	}
+	if t.DepositProjectID.Valid {
+		m["depositForProjectId"] = t.DepositProjectID.Int64
 	}
 	if t.AccountCurrency != "" {
 		m["currency"] = t.AccountCurrency
@@ -999,20 +1025,26 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
-	date := make(map[int64]string, len(txs))
-	amount := make(map[int64]float64, len(txs))
+	byID := make(map[int64]model.Transaction, len(txs))
 	for _, t := range txs {
-		date[t.ID], amount[t.ID] = t.Date, t.Amount
+		byID[t.ID] = t
 	}
+	hints := model.ProjectHints(txs)
 	var groups []map[string]any
-	totalTx, withSuggestion := 0, 0
+	totalTx, withSuggestion, linked := 0, 0, 0
 	for _, g := range model.SuggestCategories(txs) {
 		var ids []int64
 		var sum float64
+		var links []map[string]any
 		for _, id := range g.IDs {
-			if inRange(date[id], from, to) {
-				ids = append(ids, id)
-				sum += amount[id]
+			t := byID[id]
+			if !inRange(t.Date, from, to) {
+				continue
+			}
+			ids = append(ids, id)
+			sum += t.Amount
+			if l := projectLink(t, hints); l != nil {
+				links = append(links, l)
 			}
 		}
 		if len(ids) == 0 {
@@ -1020,6 +1052,10 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 		}
 		totalTx += len(ids)
 		row := map[string]any{"payee": g.Payee, "count": len(ids), "total": r2(sum), "transactionIds": ids}
+		if links != nil {
+			linked += len(links)
+			row["projectLinks"] = links
+		}
 		if g.SuggestedID != 0 {
 			withSuggestion += len(ids)
 			row["suggestedCategoryId"] = g.SuggestedID
@@ -1035,9 +1071,34 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 		groups = []map[string]any{}
 	}
 	return map[string]any{
-		"uncategorizedTransactions": totalTx, "withSuggestion": withSuggestion,
+		"uncategorizedTransactions": totalTx, "withSuggestion": withSuggestion, "linkedToProjects": linked,
 		"returnedGroups": len(groups), "groups": groups,
 	}, nil
+}
+
+// projectLink describes an uncategorized transaction's project link (item
+// payment, loan deposit, or plain project tag) — that money is already
+// tracked by the project, whatever category it gets — plus the category the
+// project's other same-sign transactions mostly use. nil when unlinked.
+func projectLink(t model.Transaction, hints map[int64]map[bool]model.ProjectHint) map[string]any {
+	pid := model.TxProject(t)
+	if pid == 0 {
+		return nil
+	}
+	l := map[string]any{"transactionId": t.ID, "projectId": pid, "project": t.ProjectName}
+	switch {
+	case t.ProjectItemID.Valid:
+		l["link"], l["itemId"], l["item"] = "item_payment", t.ProjectItemID.Int64, t.ItemName
+	case t.DepositProjectID.Valid:
+		l["link"] = "loan_deposit"
+	default:
+		l["link"] = "project"
+	}
+	if h, ok := hints[pid][t.Amount > 0]; ok {
+		l["projectSuggestedCategoryId"], l["projectSuggestedCategory"] = h.CategoryID, h.Category
+		l["projectConfidence"], l["projectBasedOnTransactions"] = h.Confidence, h.Basis
+	}
+	return l
 }
 
 func (c *Controller) mcpAnomalies(u *model.User, a mcpArgs) (map[string]any, error) {
