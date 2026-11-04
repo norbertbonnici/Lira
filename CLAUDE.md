@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Guidance for working on **Lira** in this repo. Read this before making changes.
 
 ## What this is
@@ -86,7 +88,8 @@ Rules:
 ## Data model
 Tables: households, users, invites, recovery_codes, sessions, accounts,
 categories, transactions, holdings, projects, project_items, project_phases,
-nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
+nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens,
+mcp_proposals, audit_log.
 - **Single shared household ledger.** `households` is one row (a display name);
   `users.role` is `admin`|`member`. Accounts/transactions/holdings are NOT scoped
   by user or household — every member sees and edits the same data. (Per-user
@@ -405,8 +408,8 @@ nav_snapshots, fx_rates, operating_costs, app_meta, pocket_entries, api_tokens.
   linking the analytical views — History, NAV forecast, Cash burn-down, Insights,
   Investment forecast. The main nav (`layout.html`) groups these under a single
   **Reports** item (History and Insights were moved off the top-level nav).
-- `accounts.currency` / `holdings.currency` are stored, but v1 sums everything as
-  EUR (FX deferred — see roadmap).
+- `accounts.currency` / `holdings.currency` are converted to EUR via `fx_rates`
+  wherever totals are computed (NAV, insights, budgets) — see Market data above.
 - **Additive migrations:** new columns on existing tables go through
   `Store.ensureColumn` in `Migrate` (idempotent `ALTER TABLE ... ADD COLUMN`),
   since `CREATE TABLE IF NOT EXISTS` won't alter an existing table. New singleton
@@ -429,6 +432,11 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
   there (Settings is admin-only). A hidden `from` field (`settings`|`pocket`) tells
   `TokenCreate`/`TokenRevoke` which page to re-render (with the one-time secret) /
   redirect to — a non-admin always gets Pocket, whatever `from` says.
+- **Token scope** (`api_tokens.scope` ∈ `read`|`write`, via `ensureColumn`, default
+  `read` so pre-existing tokens stay read-only): the form's "Allow AI changes"
+  checkbox mints a `write` token; `APIAuth` puts the scope on `User.APIScope`.
+  Scope gates **only the MCP write tools** — the `/api/v1` REST writes predate it
+  and stay ungated so existing clients keep working.
 - Endpoints (all `c.APIAuth(...)` in `main.go`): `GET /me`, `/summary`, `/accounts`,
   `/transactions`, `/holdings`, `/projects`, `/costs`, `/pocket`; writes `POST
   /transactions`, `/accounts`, `/holdings`, `/pocket` and `DELETE /transactions/{id}`,
@@ -439,7 +447,7 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
 - Deferred (easy to add): edits/`PUT`, projects/costs writes, transfers, pagination.
   Served over TLS (Cloudflare/Caddy) — token + HTTPS is the whole model.
 
-## MCP server (`/mcp`, `controller/mcp.go`)
+## MCP server (`/mcp`, `controller/mcp.go`, `controller/mcp_write.go`)
 A Model Context Protocol endpoint for LLM clients (Claude Code/Desktop, the Claude
 API MCP connector, self-hosted models via an MCP-capable front end). **Hand-rolled
 on the stdlib** (no SDK dependency): JSON-RPC 2.0 over MCP **Streamable HTTP, JSON
@@ -452,7 +460,9 @@ latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must ma
 - Auth: routed as `mux.HandleFunc("/mcp", c.APIAuth(c.MCP))` — the same per-user
   bearer token as `/api/v1` (401s carry `WWW-Authenticate: Bearer`), so `get_pocket`
   only ever sees the token owner's pot.
-- **Every tool is read-only** (annotated `readOnlyHint`). Tools live in the
+- Tools are **read-only by default**; write tools carry `Scope: model.ScopeWrite`
+  and are hidden from `tools/list` (and refused in-band on call) for read tokens.
+  Annotations derive from `Mutating` (`readOnlyHint: !Mutating`). Tools live in the
   `mcpTools` table (name, description, JSON Schema via the `schema`/`sInt`/... helpers,
   `Run`); args are validated by `mcpArgs` helpers and failures are returned in-band
   (`isError: true`) so the model can correct itself; an unknown tool is a JSON-RPC
@@ -472,9 +482,26 @@ latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must ma
   suggestions) and the handlers filter findings by date range afterwards.
 - The server `instructions` tell the model that payee/notes text is untrusted
   (bank/CSV-sourced), since it flows straight into the model's context.
-- Deferred: write tools (recategorize, delete duplicate, pay item) — would need
-  token scopes (`api_tokens.scope` via `ensureColumn`), a propose→apply flow, an
-  audit log, and a `Store.Backup` before batch changes.
+- **Write tools follow propose→apply** (`controller/mcp_write.go`,
+  `model/changes.go`). `propose_recategorization` validates `{transactionId,
+  categoryId|null}` changes (≤500; malformed input is an error, state problems —
+  missing row, transfer leg, unknown category, no-op — are per-row `skipped`;
+  kind/sign mismatches only warn), changes nothing, and stores the plan in
+  `mcp_proposals` (random id, owner-scoped, 30-min TTL) along with each row's
+  **current** category. `apply_recategorization` (the only `Mutating` tool) writes a
+  pre-change backup when >1 row changes (`preChangeBackup`: `VACUUM INTO`
+  `<dir of LIRA_DB>/backups/lira-pre-mcp-*.db`, 0600, newest 10 kept; a failed
+  backup refuses the apply), then `Store.ApplyRecategorization` claims the
+  proposal (`applied_at`, one conditional UPDATE) and applies every change in
+  **one DB transaction**, each conditional on `category_id IS <proposed-from>` so a
+  human edit made after the proposal is skipped, not overwritten; each applied row
+  gets an `audit_log` entry (old/new as JSON with the category name at the time).
+  The result returns `undoChanges` (feed back into propose). `list_recent_changes`
+  (read scope) exposes the audit log. The server `instructions` tell the model to
+  apply only after the user explicitly approves that proposal.
+- Deferred: more write tools (delete duplicate, pay item) — reuse the proposal +
+  audit plumbing (new `Action*` const, a `Store.Apply*` that claims + applies +
+  audits in one tx); a web page for the audit log.
 
 ## Auth & security model
 - **Invite-only.** Public `/register` works ONLY to create the first account =
@@ -556,6 +583,8 @@ selection via config, multi-base currency.
   buffer is unspent runway, never drawn down); cosmetic, predates partial payments.
 
 ## Tests
-`go test ./...`. `internal/view` verifies every template parses + executes with
-realistic data; `internal/controller` verifies TOTP against RFC 6238 vectors.
-Add tests alongside the package you touch.
+`go test ./...` (see Commands for the per-package scope; `main_test.go` covers
+`limitBody`, `internal/market` the provider/refresh logic). Store tests use a
+temporary SQLite DB; the auth lockout/one-time-consumption tests fire parallel
+requests, so keep them race-safe. Add tests alongside the package you touch, and
+`gofmt` Go changes.

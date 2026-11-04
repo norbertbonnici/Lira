@@ -88,15 +88,18 @@
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <input type="hidden" name="from" value="pocket">
     <input name="name" placeholder="e.g. iPhone" maxlength="40">
+    <label class="radio" style="flex:0 0 auto"><input type="checkbox" name="write" value="1" style="width:auto"> Allow AI changes</label>
     <button type="submit" class="primary">Generate token</button>
   </form>
+  <p class="muted small"><strong>Allow AI changes</strong> lets an AI assistant connected over MCP (<code>/mcp</code>) propose and — once you approve in the chat — apply edits such as recategorizing transactions. Every applied change is logged, and batches back up the database first. Leave it off for read-only access.</p>
   {{if .Tokens}}
   <table class="rows">
-    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Access</th><th>Created</th><th>Last used</th><th></th></tr></thead>
     <tbody>
     {{range .Tokens}}
       <tr>
         <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">Unnamed</span>{{end}}</td>
+        <td>{{if eq .Scope "write"}}<span class="tag">AI changes</span>{{else}}<span class="muted small">read</span>{{end}}</td>
         <td class="muted small">{{.CreatedAt}}</td>
         <td class="muted small">{{if .LastUsedAt}}{{.LastUsedAt}}{{else}}never{{end}}</td>
         <td class="rowact">

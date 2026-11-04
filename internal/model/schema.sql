@@ -197,6 +197,35 @@ CREATE TABLE IF NOT EXISTS pocket_entries (
     created_at TEXT    NOT NULL
 );
 
+-- Pending MCP write proposals (propose→apply). The id is an unguessable random
+-- token handed to the client; apply claims it atomically (applied_at) within the
+-- same DB transaction as the changes, so a proposal applies at most once.
+CREATE TABLE IF NOT EXISTS mcp_proposals (
+    id         TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    action     TEXT    NOT NULL,
+    payload    TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL,
+    applied_at TEXT    NOT NULL DEFAULT ''
+);
+
+-- Who changed what through an automated surface (MCP), one row per changed
+-- entity, written in the same DB transaction as the change. old/new values are
+-- small JSON objects.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    source     TEXT    NOT NULL,
+    action     TEXT    NOT NULL,
+    entity     TEXT    NOT NULL,
+    entity_id  INTEGER NOT NULL,
+    old_value  TEXT    NOT NULL DEFAULT '',
+    new_value  TEXT    NOT NULL DEFAULT '',
+    ref        TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_tx_date     ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_tx_project  ON transactions(project_id);
@@ -205,5 +234,6 @@ CREATE INDEX IF NOT EXISTS idx_pitem_project ON project_items(project_id);
 CREATE INDEX IF NOT EXISTS idx_phase_project ON project_phases(project_id);
 CREATE INDEX IF NOT EXISTS idx_pocket_user  ON pocket_entries(user_id);
 CREATE INDEX IF NOT EXISTS idx_apitoken_user ON api_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
 -- idx_pitem_phase is created in Migrate(), AFTER ensureColumn adds phase_id to
 -- pre-existing project_items tables (it can't be indexed before it exists).

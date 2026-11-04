@@ -138,7 +138,7 @@ func TestSearchTransactions(t *testing.T) {
 	must(s.CreateTransaction(a1, "2026-01-05", -20, &gid, "Lidl", "weekly shop"))
 	must(s.CreateTransaction(a1, "2026-01-10", -500, nil, "Landlord", "rent 100%"))
 	must(s.CreateTransaction(a1, "2026-02-01", 2000, nil, "Employer", ""))
-	must(s.CreateTransfer(a1, a2, "2026-02-02", 100, "to savings"))
+	must(s.CreateTransfer(a1, a2, "2026-02-02", 100, 100, "to savings"))
 
 	count := func(f TxFilter) int {
 		t.Helper()

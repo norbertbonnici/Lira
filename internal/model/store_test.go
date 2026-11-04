@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -310,10 +311,10 @@ func TestAPITokens(t *testing.T) {
 	alice, _ := s.CreateUser("alice", "h", "admin")
 	bob, _ := s.CreateUser("bob", "h", "member")
 
-	if err := s.CreateAPIToken(alice, "iPhone", "hash-a"); err != nil {
+	if err := s.CreateAPIToken(alice, "iPhone", "hash-a", ScopeWrite); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateAPIToken(bob, "iPad", "hash-b"); err != nil {
+	if err := s.CreateAPIToken(bob, "iPad", "hash-b", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1750,5 +1751,53 @@ func TestPayItemConcurrentPaymentsClose(t *testing.T) {
 		if it, _ := s.GetProjectItem(item); it.AmountPaid != 100 || !it.Purchased {
 			t.Fatalf("run %d: %+v want paid 100 and purchased", run, it)
 		}
+	}
+}
+
+// A proposal applies at most once, even when two applies race.
+func TestApplyRecategorizationOnce(t *testing.T) {
+	s := testStore(t)
+	uid, err := s.CreateUser("alice", "h", "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAccount("Main", "current", "EUR", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	accts, _ := s.ListAccounts()
+	if err := s.CreateTransaction(accts[0].ID, "2026-01-01", -5, nil, "Kiosk", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateCategory("Snacks", "expense"); err != nil {
+		t.Fatal(err)
+	}
+	txs, _ := s.SearchTransactions(TxFilter{})
+	cats, _ := s.ListCategories()
+	changes := []RecatChange{{TxID: txs[0].ID, To: &cats[0].ID}}
+	id, _, err := s.CreateProposal(uid, ActionRecategorize, []byte(`[]`), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			applied, _, err := s.ApplyRecategorization(uid, id, "test", changes)
+			if err == nil && len(applied) == 1 {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("proposal applied %d times, want 1", wins)
+	}
+	if log, _ := s.ListAuditLog(10); len(log) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(log))
 	}
 }
