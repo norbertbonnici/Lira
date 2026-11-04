@@ -476,7 +476,9 @@ latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must ma
   joins `AccountCurrency`/`CategoryKind` onto `Transaction`), and the pure, tested
   audits `FindDuplicates(txs, windowDays)` (same account + cents + `TxDedupKey`-style
   payee, clustered by date gap), `SuggestCategories` (uncategorized rows grouped by
-  `NormalizePayee` + sign, suggesting the payee's most-used category), and
+  `NormalizePayee` + sign, suggesting the payee's most-used category — only when
+  that history has ≥ `SuggestMinHistory` (3) rows and the winner covers ≥
+  `SuggestMinConfidence` (60%), the same gate `ProjectHints` uses), and
   `FindAnomalies` (sign_mismatch / outlier vs payee median / future_dated /
   zero_amount). Audits read the **full** ledger (history informs medians and
   suggestions) and the handlers filter findings by date range afterwards.

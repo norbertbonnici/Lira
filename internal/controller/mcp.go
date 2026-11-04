@@ -470,6 +470,7 @@ var mcpTools = []mcpTool{
 	{
 		Name: "find_uncategorized_transactions", Title: "Audit: uncategorized",
 		Description: "Uncategorized transactions grouped by payee, each with a suggested category learned from how the same payee is categorized elsewhere in the ledger (with a confidence share and the size of that history). " +
+			"A suggestion is only made when that history has at least 3 categorized rows and one category covers at least 60% of them; groups without one need a human (or the model's own judgement, flagged as such). " +
 			"projectLinks lists rows already tied to a project (item payment, loan deposit, or project tag) — that money is tracked by the project whatever its category — " +
 			"with the category the project's other transactions mostly use, as a fallback suggestion.",
 		Schema: schema(props{

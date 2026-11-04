@@ -284,7 +284,7 @@ func TestMCPUncategorizedProjectLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"Tiles", "Sink"} {
+	for _, n := range []string{"Tiles", "Sink", "Tap", "Mirror"} {
 		if err := store.CreateProjectItem(pid, nil, n, 500, true); err != nil {
 			t.Fatal(err)
 		}
@@ -297,10 +297,11 @@ func TestMCPUncategorizedProjectLinks(t *testing.T) {
 			other = c.ID
 		}
 	}
-	// Sink payment categorized "Other" → the project's spend hint; Tiles uncategorized.
+	// Sink/Tap/Mirror payments categorized "Other" → the project's spend hint
+	// (3 rows clears model.SuggestMinHistory); Tiles uncategorized.
 	for _, it := range items {
 		var cat *int64
-		if it.Name == "Sink" {
+		if it.Name != "Tiles" {
 			cat = &other
 		}
 		if err := store.PayItem(it.ID, acct, "2026-03-01", 200, cat, false); err != nil {

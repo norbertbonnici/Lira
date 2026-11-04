@@ -242,10 +242,25 @@ type UncategorizedGroup struct {
 	Basis      int
 }
 
+// Suggestion thresholds: a category is suggested (for a payee, or as a
+// project's fallback hint) only when its history has at least
+// SuggestMinHistory categorized rows and the winning category covers at least
+// SuggestMinConfidence of them — so one or two stray rows can't put a
+// confident-looking suggestion in front of a model or a person.
+const (
+	SuggestMinHistory    = 3
+	SuggestMinConfidence = 0.6
+)
+
+// confidentSuggestion reports whether best of n rows clears the thresholds.
+func confidentSuggestion(best, n int) bool {
+	return n >= SuggestMinHistory && float64(best) >= SuggestMinConfidence*float64(n)
+}
+
 // SuggestCategories groups the uncategorized, non-transfer transactions by
 // normalized payee and sign, and suggests the category most often used for the
-// same payee and sign among the categorized rows. Groups are ordered by size,
-// then |total|. Pure.
+// same payee and sign among the categorized rows, when that history clears the
+// suggestion thresholds. Groups are ordered by size, then |total|. Pure.
 func SuggestCategories(txs []Transaction) []UncategorizedGroup {
 	type key struct {
 		payee string
@@ -299,9 +314,11 @@ func SuggestCategories(txs []Transaction) []UncategorizedGroup {
 					best, bestN = id, n
 				}
 			}
-			g.SuggestedID, g.Suggested = best, h.names[best]
-			g.Confidence = math.Round(float64(bestN)/float64(h.n)*100) / 100
-			g.Basis = h.n
+			if confidentSuggestion(bestN, h.n) {
+				g.SuggestedID, g.Suggested = best, h.names[best]
+				g.Confidence = math.Round(float64(bestN)/float64(h.n)*100) / 100
+				g.Basis = h.n
+			}
 		}
 		out = append(out, *g)
 	}
@@ -336,8 +353,8 @@ type ProjectHint struct {
 }
 
 // ProjectHints maps project id → sign (true = positive) → the most-used
-// category among that project's categorized, non-transfer transactions.
-// Pure.
+// category among that project's categorized, non-transfer transactions, when
+// that history clears the suggestion thresholds. Pure.
 func ProjectHints(txs []Transaction) map[int64]map[bool]ProjectHint {
 	type key struct {
 		project int64
@@ -367,6 +384,9 @@ func ProjectHints(txs []Transaction) map[int64]map[bool]ProjectHint {
 			if n > bestN || (n == bestN && id < best) {
 				best, bestN = id, n
 			}
+		}
+		if !confidentSuggestion(bestN, totals[k]) {
+			continue
 		}
 		if out[k.project] == nil {
 			out[k.project] = map[bool]ProjectHint{}
