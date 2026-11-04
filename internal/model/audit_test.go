@@ -60,13 +60,23 @@ func TestSuggestCategories(t *testing.T) {
 		cat(tx(2, 1, "2026-01-08", -25, "CARD 22 LIDL"), 3, "Groceries", "expense"),
 		cat(tx(3, 1, "2026-01-09", -5, "CARD 33 LIDL"), 7, "Other", "expense"),
 		cat(tx(4, 1, "2026-01-10", 5, "CARD 44 LIDL"), 2, "Other income", "income"), // refund history
+		cat(tx(9, 1, "2026-01-11", 4, "CARD 45 LIDL"), 2, "Other income", "income"),
+		cat(tx(10, 1, "2026-01-12", 6, "CARD 46 LIDL"), 2, "Other income", "income"),
+		cat(tx(11, 1, "2026-01-01", 900, "Savings"), 1, "Salary", "income"), // thin history: 2 rows
+		cat(tx(12, 1, "2026-01-02", 800, "Savings"), 2, "Other income", "income"),
+		cat(tx(13, 1, "2026-01-03", -7, "Kiosk"), 3, "Groceries", "expense"), // split history: 2/4 = 0.5
+		cat(tx(14, 1, "2026-01-04", -7, "Kiosk"), 3, "Groceries", "expense"),
+		cat(tx(15, 1, "2026-01-05", -7, "Kiosk"), 6, "Dining", "expense"),
+		cat(tx(16, 1, "2026-01-06", -7, "Kiosk"), 7, "Other", "expense"),
 		tx(5, 1, "2026-02-01", -30, "CARD 55 LIDL"),
 		tx(6, 1, "2026-02-02", -10, "CARD 66 LIDL"),
 		tx(7, 1, "2026-02-03", 3, "CARD 77 LIDL"), // positive → matched against refund history
 		tx(8, 1, "2026-02-04", -9, "New Shop"),    // no history
+		tx(17, 1, "2026-02-05", 1000, "Savings"),  // below SuggestMinHistory
+		tx(18, 1, "2026-02-06", -7, "Kiosk"),      // below SuggestMinConfidence
 	}
 	got := SuggestCategories(txs)
-	if len(got) != 3 {
+	if len(got) != 5 {
 		t.Fatalf("want 3 groups, got %+v", got)
 	}
 	g := got[0]
@@ -80,8 +90,10 @@ func TestSuggestCategories(t *testing.T) {
 	if r := byPayee["CARD 77 LIDL"]; r.SuggestedID != 2 || r.Confidence != 1 {
 		t.Errorf("refund group should suggest the income category: %+v", r)
 	}
-	if n := byPayee["New Shop"]; n.SuggestedID != 0 || n.Count != 1 {
-		t.Errorf("no-history group should have no suggestion: %+v", n)
+	for _, p := range []string{"New Shop", "Savings", "Kiosk"} {
+		if n := byPayee[p]; n.SuggestedID != 0 || n.Confidence != 0 || n.Basis != 0 || n.Count != 1 {
+			t.Errorf("%s: weak or missing history should give no suggestion: %+v", p, n)
+		}
 	}
 }
 

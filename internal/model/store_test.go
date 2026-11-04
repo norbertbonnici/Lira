@@ -1898,16 +1898,18 @@ func TestProjectHints(t *testing.T) {
 		{ID: 2, Amount: -20, ProjectID: p(7), CategoryID: c1, CategoryName: n1},
 		{ID: 3, Amount: -5, ProjectID: p(7), CategoryID: c2, CategoryName: n2},
 		{ID: 4, Amount: -5, ProjectID: p(7)},                                          // uncategorized: no vote
-		{ID: 5, Amount: 50, ProjectID: p(7), CategoryID: c2, CategoryName: n2},        // positive: own bucket
+		{ID: 5, Amount: 50, ProjectID: p(7), CategoryID: c2, CategoryName: n2},        // positive: own bucket, too thin to hint
 		{ID: 6, Amount: -9, DepositProjectID: p(8), CategoryID: c2, CategoryName: n2}, // deposit links project 8
-		{ID: 7, Amount: -9, ProjectID: p(9), CategoryID: c1, TransferID: p(1)},        // transfer leg ignored
+		{ID: 8, Amount: -9, DepositProjectID: p(8), CategoryID: c2, CategoryName: n2},
+		{ID: 9, Amount: -9, ProjectID: p(8), CategoryID: c2, CategoryName: n2},
+		{ID: 7, Amount: -9, ProjectID: p(9), CategoryID: c1, TransferID: p(1)}, // transfer leg ignored
 	}
 	h := ProjectHints(txs)
 	if got := h[7][false]; got.CategoryID != 1 || got.Basis != 3 || got.Confidence != 0.67 {
 		t.Errorf("project 7 spend: %+v", got)
 	}
-	if got := h[7][true]; got.CategoryID != 2 || got.Basis != 1 {
-		t.Errorf("project 7 income: %+v", got)
+	if got, ok := h[7][true]; ok {
+		t.Errorf("project 7 income has 1 row of history, want no hint: %+v", got)
 	}
 	if got := h[8][false]; got.CategoryID != 2 {
 		t.Errorf("deposit project: %+v", got)
