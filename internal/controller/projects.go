@@ -121,12 +121,21 @@ func (c *Controller) projectGroups(p *model.Project, now time.Time) ([]phaseGrou
 }
 
 // stillToDraw is how much of a plan's Financed figure has not actually left the
-// accounts yet. A PAID loan deposit already reduced NAV (it's a real
-// transaction), so projections must not subtract it a second time. The credit
-// applies regardless of the CURRENT finance method: switching a project back to
-// "save" after paying the deposit must not make the paid money count twice.
+// accounts yet. Payments are real transactions that already reduced NAV, so
+// projections must not subtract them a second time:
+//   - loan-financed: Financed is the deposit, so credit the deposit paid (item
+//     payments are funded by the loan, not the deposit);
+//   - save-financed: payments draw the financed share first (the money that
+//     exists today — see model.ProjectPlan.ToSave), so credit everything paid:
+//     plan.Spent, which for projectGroups' aggregate includes item payments AND
+//     any deposit paid before a switch back from "loan" (so that money can't
+//     count twice either).
 func stillToDraw(p *model.Project, plan model.ProjectPlan) float64 {
-	f := plan.Financed - p.DepositPaid
+	paid := p.DepositPaid
+	if !loanFinanced(p) {
+		paid = plan.Spent
+	}
+	f := plan.Financed - paid
 	if f < 0 {
 		f = 0
 	}
@@ -136,6 +145,22 @@ func stillToDraw(p *model.Project, plan model.ProjectPlan) float64 {
 // loanFinanced reports whether a project should be funded by a modelled loan.
 func loanFinanced(p *model.Project) bool {
 	return p.FinanceMethod == "loan" && p.LoanTermMonths > 0
+}
+
+// loanRepaying reports whether a loan-financed project still has repayments
+// ahead of it at now (not started yet, or mid-term), using the same month
+// granularity as model.FinanceWithLoan. A loan with no usable start date is
+// treated as running, as FinanceWithLoan keeps charging it.
+func loanRepaying(p *model.Project, now time.Time) bool {
+	if !loanFinanced(p) {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", p.LoanStartDate)
+	if err != nil {
+		return true
+	}
+	diff := (t.Year()*12 + int(t.Month())) - (now.Year()*12 + int(now.Month()))
+	return diff > -p.LoanTermMonths
 }
 
 // projectInput builds the editable project fields from a submitted form.
@@ -236,6 +261,15 @@ func validateProject(in model.ProjectInput) string {
 	if in.FinanceMethod == "loan" && in.LoanTermMonths <= 0 {
 		return "A loan term (months) is required when financing with a loan."
 	}
+	if in.FinancePct < 0 || in.FinancePct > 100 {
+		return "Finance from savings must be between 0 and 100%."
+	}
+	if in.BufferPct < 0 {
+		return "Contingency buffer can't be negative."
+	}
+	if in.LoanDeposit < 0 || in.LoanAPR < 0 {
+		return "Loan deposit and APR can't be negative."
+	}
 	if in.LoanStartDate != "" {
 		if _, err := time.Parse("2006-01-02", in.LoanStartDate); err != nil {
 			return "Loan start date must be a valid date (YYYY-MM-DD)."
@@ -324,22 +358,30 @@ func (c *Controller) LoanUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := pathID(r)
+	p, err := c.store.GetProject(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	term := int(parseFloat(r.FormValue("loan_term_months")))
 	if term < 0 {
 		term = 0
 	}
+	// A loan-financed project always has a term (validateProject enforces it on
+	// the edit form); a blank or zero term here would silently turn it into a
+	// target-date saving plan, so keep the stored one.
+	if term == 0 && p.FinanceMethod == "loan" {
+		term = p.LoanTermMonths
+	}
 	start := strings.TrimSpace(r.FormValue("loan_start_date"))
 	if start != "" {
 		if _, err := time.Parse("2006-01-02", start); err != nil {
-			// Unparseable input must not wipe a previously stored date.
-			if p, perr := c.store.GetProject(id); perr == nil {
-				start = p.LoanStartDate
-			} else {
-				start = ""
-			}
+			start = p.LoanStartDate // unparseable input must not wipe a stored date
 		}
 	}
-	_ = c.store.UpdateProjectLoan(id, parseFloat(r.FormValue("loan_deposit")), parseFloat(r.FormValue("loan_apr")), term, start)
+	deposit := max(parseFloat(r.FormValue("loan_deposit")), 0)
+	apr := max(parseFloat(r.FormValue("loan_apr")), 0)
+	_ = c.store.UpdateProjectLoan(id, deposit, apr, term, start)
 	http.Redirect(w, r, projectURL(id), http.StatusSeeOther)
 }
 
@@ -495,15 +537,50 @@ func (c *Controller) ProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 // ---------- Project items ----------
 
+// projectItem loads the {itemID} item only if it belongs to the {id} project in
+// the URL, so a handler can't be pointed at another project's item (which
+// would, e.g., auto-complete the wrong project). ItemMove does the same.
+func (c *Controller) projectItem(r *http.Request) (*model.ProjectItem, bool) {
+	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
+	if err != nil || it.ProjectID != pathID(r) {
+		return nil, false
+	}
+	return it, true
+}
+
+// projectPhase is projectItem for the {phaseID} phase.
+func (c *Controller) projectPhase(r *http.Request) (*model.Phase, bool) {
+	ph, err := c.store.GetPhase(pathInt(r, "phaseID"))
+	if err != nil || ph.ProjectID != pathID(r) {
+		return nil, false
+	}
+	return ph, true
+}
+
+// phaseOfProject reports whether an optional phase id (nil = General) belongs
+// to project pid.
+func (c *Controller) phaseOfProject(phaseID *int64, pid int64) bool {
+	if phaseID == nil {
+		return true
+	}
+	ph, err := c.store.GetPhase(*phaseID)
+	return err == nil && ph.ProjectID == pid
+}
+
 func (c *Controller) ItemCreate(w http.ResponseWriter, r *http.Request) {
 	if !c.checkCSRF(r) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 	pid := pathID(r)
+	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
 	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.CreateProjectItem(pid, nullableID(r.FormValue("phase_id")), name,
-			parseFloat(r.FormValue("estimated_cost")), r.FormValue("essential") != "0")
+		phase := nullableID(r.FormValue("phase_id"))
+		// A phase from another project would leave the item in no group (its
+		// cost silently missing from the plan), so it's ignored like ItemMove does.
+		if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 && c.phaseOfProject(phase, pid) {
+			_ = c.store.CreateProjectItem(pid, phase, name, est, r.FormValue("essential") != "0")
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
@@ -523,8 +600,8 @@ func (c *Controller) PhaseCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) PhaseEdit(w http.ResponseWriter, r *http.Request) {
-	ph, err := c.store.GetPhase(pathInt(r, "phaseID"))
-	if err != nil {
+	ph, ok := c.projectPhase(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -540,8 +617,10 @@ func (c *Controller) PhaseUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
-	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.UpdatePhase(pathInt(r, "phaseID"), name, strings.TrimSpace(r.FormValue("target_date")))
+	if ph, ok := c.projectPhase(r); ok {
+		if name := strings.TrimSpace(r.FormValue("name")); name != "" {
+			_ = c.store.UpdatePhase(ph.ID, name, strings.TrimSpace(r.FormValue("target_date")))
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
@@ -551,13 +630,15 @@ func (c *Controller) PhaseDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	_ = c.store.DeletePhase(pathInt(r, "phaseID"))
+	if ph, ok := c.projectPhase(r); ok {
+		_ = c.store.DeletePhase(ph.ID)
+	}
 	http.Redirect(w, r, projectURL(pathID(r)), http.StatusSeeOther)
 }
 
 func (c *Controller) ItemEdit(w http.ResponseWriter, r *http.Request) {
-	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
-	if err != nil {
+	it, ok := c.projectItem(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -573,8 +654,13 @@ func (c *Controller) ItemUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
-	if name := strings.TrimSpace(r.FormValue("name")); name != "" {
-		_ = c.store.UpdateProjectItem(pathInt(r, "itemID"), name, parseFloat(r.FormValue("estimated_cost")), r.FormValue("essential") != "0")
+	// Like a blank name, a negative estimate is ignored (it would shrink the budget).
+	if it, ok := c.projectItem(r); ok {
+		if name := strings.TrimSpace(r.FormValue("name")); name != "" {
+			if est := parseFloat(r.FormValue("estimated_cost")); est >= 0 {
+				_ = c.store.UpdateProjectItem(it.ID, name, est, r.FormValue("essential") != "0")
+			}
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }
@@ -584,7 +670,9 @@ func (c *Controller) ItemDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	_ = c.store.DeleteProjectItem(pathInt(r, "itemID"))
+	if it, ok := c.projectItem(r); ok {
+		_ = c.store.DeleteProjectItem(it.ID)
+	}
 	http.Redirect(w, r, projectURL(pathID(r)), http.StatusSeeOther)
 }
 
@@ -595,19 +683,15 @@ func (c *Controller) ItemMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pid := pathID(r)
-	// Item must belong to this project.
-	it, err := c.store.GetProjectItem(pathInt(r, "itemID"))
-	if err != nil || it.ProjectID != pid {
+	it, ok := c.projectItem(r) // item must belong to this project
+	if !ok {
 		http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 		return
 	}
 	target := nullableID(r.FormValue("phase_id"))
-	// A named target phase must belong to this same project.
-	if target != nil {
-		if ph, err := c.store.GetPhase(*target); err != nil || ph.ProjectID != pid {
-			http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
-			return
-		}
+	if !c.phaseOfProject(target, pid) { // a named target phase must be this project's
+		http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
+		return
 	}
 	_ = c.store.SetItemPhase(it.ID, target)
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
@@ -645,8 +729,8 @@ func (c *Controller) payFormData(pid, itemID int64, errMsg string) map[string]an
 
 func (c *Controller) ItemPurchaseForm(w http.ResponseWriter, r *http.Request) {
 	pid, itemID := pathID(r), pathInt(r, "itemID")
-	it, err := c.store.GetProjectItem(itemID)
-	if err != nil {
+	it, ok := c.projectItem(r)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -664,7 +748,7 @@ func (c *Controller) ItemPurchase(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := pathID(r)
 	itemID := pathInt(r, "itemID")
-	if _, err := c.store.GetProjectItem(itemID); err != nil { // item gone since the form loaded
+	if _, ok := c.projectItem(r); !ok { // gone since the form loaded, or another project's
 		http.NotFound(w, r)
 		return
 	}
@@ -682,9 +766,13 @@ func (c *Controller) ItemPurchase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	// Auto-complete the project once every item is fully paid.
+	// Auto-complete the project once every item is fully paid — unless it is
+	// loan-financed with repayments still to come: a completed project leaves the
+	// budget, which would silently drop the monthly loan payment from it.
 	if n, err := c.store.CountUnpurchasedItems(pid); err == nil && n == 0 {
-		_ = c.store.SetProjectStatus(pid, "completed")
+		if p, err := c.store.GetProject(pid); err == nil && !loanRepaying(p, time.Now()) {
+			_ = c.store.SetProjectStatus(pid, "completed")
+		}
 	}
 	http.Redirect(w, r, projectURL(pid), http.StatusSeeOther)
 }

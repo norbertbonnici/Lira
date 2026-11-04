@@ -2,6 +2,7 @@ package market
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -109,5 +110,56 @@ func TestUpdatePrices(t *testing.T) {
 	}
 	if _, ok := ps.updated["VWCE"]; ok {
 		t.Error("missing symbol should not be updated (price preserved)")
+	}
+}
+
+type fakeFX struct{ err error }
+
+func (f fakeFX) RatesToEUR(ctx context.Context, ccys []string) (map[string]float64, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return map[string]float64{"USD": 0.9}, nil
+}
+
+type fakePrices struct{}
+
+func (fakePrices) Quotes(ctx context.Context, syms []string) (map[string]Quote, error) {
+	out := map[string]Quote{}
+	for _, s := range syms {
+		out[s] = Quote{Symbol: s, Price: 42}
+	}
+	return out, nil
+}
+
+type memStore struct {
+	prices map[string]float64
+	rates  map[string]float64
+}
+
+func (m *memStore) DistinctHoldingSymbols() ([]string, error) { return []string{"AAPL"}, nil }
+func (m *memStore) UpdateHoldingPrice(sym string, p float64) error {
+	m.prices[sym] = p
+	return nil
+}
+func (m *memStore) DistinctCurrencies() ([]string, error) { return []string{"US$"}, nil }
+func (m *memStore) UpsertFXRate(c string, r float64) error {
+	m.rates[c] = r
+	return nil
+}
+
+// An FX failure (e.g. a currency code the provider rejects) must not stop the
+// price update; the error is still reported.
+func TestRefreshUpdatesPricesWhenFXFails(t *testing.T) {
+	s := &memStore{prices: map[string]float64{}, rates: map[string]float64{}}
+	err := Refresh(context.Background(), fakeFX{err: errors.New("unknown symbol US$/EUR")}, s, fakePrices{}, s)
+	if s.prices["AAPL"] != 42 {
+		t.Errorf("prices not updated after an FX failure: %v", s.prices)
+	}
+	if err == nil || !strings.Contains(err.Error(), "fx:") {
+		t.Errorf("err = %v, want the FX failure reported", err)
+	}
+	if err := Refresh(context.Background(), fakeFX{}, s, fakePrices{}, s); err != nil || s.rates["USD"] != 0.9 {
+		t.Errorf("clean refresh: err %v rates %v", err, s.rates)
 	}
 }

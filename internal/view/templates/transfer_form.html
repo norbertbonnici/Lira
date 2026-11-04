@@ -8,12 +8,12 @@
     <div class="row2">
       <label>From
         <select name="from_id" required>
-          {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+          {{range .Accounts}}<option value="{{.ID}}">{{.Name}} ({{.Currency}})</option>{{end}}
         </select>
       </label>
       <label>To
         <select name="to_id" required>
-          {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+          {{range .Accounts}}<option value="{{.ID}}">{{.Name}} ({{.Currency}})</option>{{end}}
         </select>
       </label>
     </div>
@@ -25,6 +25,9 @@
         <input type="date" name="date" value="{{today}}" required>
       </label>
     </div>
+    <label>Amount received <span class="muted small">(only between accounts in different currencies — in the “To” account's currency)</span>
+      <input name="received" type="text" inputmode="decimal" placeholder="optional">
+    </label>
     <label>Notes
       <input name="notes" placeholder="optional">
     </label>
@@ -33,7 +36,7 @@
       <a class="cancel" href="/transactions">Cancel</a>
     </div>
   </form>
-  <p class="muted small">Creates two balanced entries (out of “From”, into “To”). Net worth is unchanged, and transfers are excluded from spending/income analytics.</p>
+  <p class="muted small">Creates two balanced entries (out of “From”, into “To”). Net worth is unchanged (apart from any exchange-rate gap between currencies), and transfers are excluded from spending/income analytics.</p>
   {{else}}
   <p class="empty">You need at least two accounts first. <a href="/accounts/new">Add an account.</a></p>
   {{end}}

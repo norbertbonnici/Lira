@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -235,11 +236,15 @@ type Phase struct {
 
 // ProjectPlan is the derived savings guidance for a project.
 type ProjectPlan struct {
-	Target        float64 // ItemsTotal × (1 + buffer/100)
-	Spent         float64
-	Remaining     float64 // Target − Spent
-	Financed      float64 // Target × finance%/100 — drawn from existing savings
-	ToSave        float64 // Target − Financed
+	Target    float64 // ItemsTotal × (1 + buffer/100)
+	Spent     float64
+	Remaining float64 // Target − Spent
+	Financed  float64 // Target × finance%/100 — drawn from existing savings
+	// ToSave is what still has to be saved: the to-save share (Target − Financed)
+	// less any payments beyond the financed share. Payments draw the financed
+	// share first — that money exists today — so it's min(Target − Financed,
+	// max(Remaining, 0)), and MonthlyToSave spreads it over the months left.
+	ToSave        float64
 	MonthlyToSave float64
 	MonthsLeft    int
 	Overdue       bool
@@ -338,8 +343,14 @@ func FinanceWithLoan(plan ProjectPlan, deposit, aprPct float64, termMonths int, 
 // it can be unit-tested directly. monthsLeft rounds partial months up.
 func ComputePlan(itemsTotal, spent, financePct, bufferPct float64, targetDate string, now time.Time) ProjectPlan {
 	target := ProjectTarget(itemsTotal, bufferPct)
+	// Clamp a stored out-of-range percentage (the form now rejects one): over 100
+	// would finance more than the budget, below 0 would save more than it.
+	financePct = min(max(financePct, 0), 100)
 	financed := target * financePct / 100
 	toSave := target - financed
+	if rem := target - spent; rem < toSave {
+		toSave = rem // already-paid money has covered part of the to-save share
+	}
 	if toSave < 0 {
 		toSave = 0
 	}
@@ -445,13 +456,14 @@ type BurnPoint struct {
 }
 
 // BuildBurnDown projects a cash balance forward `months` months: starting at
-// `start`, each month adds `monthlyIn`, subtracts `outs[m]` (recurring per-month
-// outflows, e.g. upcoming loan repayments — drawn from the balance but NOT
-// marked as spend dots), and subtracts any scheduled lump in `events` (marked as
-// that month's Spend). Both maps are keyed by 1-based month number. Month 0 is
-// today (just the starting balance). The balance may go negative — that is a
-// useful "you'd run out" signal, not an error. Pure.
-func BuildBurnDown(start, monthlyIn float64, outs, events map[int]float64, months int) []BurnPoint {
+// `start`, each month adds `monthlyIn` plus `ins[m]` (per-month inflows, e.g.
+// money set aside for a project ahead of its purchase), subtracts `outs[m]`
+// (recurring per-month outflows, e.g. upcoming loan repayments — drawn from the
+// balance but NOT marked as spend dots), and subtracts any scheduled lump in
+// `events` (marked as that month's Spend). All maps are keyed by 1-based month
+// number. Month 0 is today (just the starting balance). The balance may go
+// negative — that is a useful "you'd run out" signal, not an error. Pure.
+func BuildBurnDown(start, monthlyIn float64, ins, outs, events map[int]float64, months int) []BurnPoint {
 	if months < 0 {
 		months = 0
 	}
@@ -459,7 +471,7 @@ func BuildBurnDown(start, monthlyIn float64, outs, events map[int]float64, month
 	bal := start
 	pts = append(pts, BurnPoint{Month: 0, Balance: bal})
 	for m := 1; m <= months; m++ {
-		bal += monthlyIn - outs[m] - events[m]
+		bal += monthlyIn + ins[m] - outs[m] - events[m]
 		pts = append(pts, BurnPoint{Month: m, Balance: bal, Spend: events[m]})
 	}
 	return pts
@@ -735,6 +747,40 @@ func (s *Store) CountUsers() (int, error) {
 	return n, err
 }
 
+// ErrUserLimit is returned when creating an account would exceed the cap.
+var ErrUserLimit = errors.New("user limit reached")
+
+// CreateUserCapped inserts a user only while fewer than maxUsers exist, checked
+// in the same statement so concurrent sign-ups can't both pass a stale count.
+// Returns ErrUserLimit when full (a duplicate username is a plain error).
+func (s *Store) CreateUserCapped(username, passwordHash, role string, maxUsers int) (int64, error) {
+	return createUserCapped(s.db, username, passwordHash, role, maxUsers)
+}
+
+// execer is satisfied by *sql.DB and *sql.Tx.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func createUserCapped(db execer, username, passwordHash, role string, maxUsers int) (int64, error) {
+	if role == "" {
+		role = "member"
+	}
+	res, err := db.Exec(
+		`INSERT INTO users(username, password_hash, role, created_at)
+		 SELECT ?,?,?,? WHERE (SELECT COUNT(*) FROM users) < ?`,
+		username, passwordHash, role, nowRFC(), maxUsers)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 0 {
+		return 0, ErrUserLimit
+	}
+	return res.LastInsertId()
+}
+
 func (s *Store) CreateUser(username, passwordHash, role string) (int64, error) {
 	if role == "" {
 		role = "member"
@@ -806,25 +852,59 @@ func (s *Store) SetTOTPLastStep(userID, step int64) error {
 	return err
 }
 
-// IncFailedLogin atomically bumps the user's failed-login counter and returns
-// the new value, so callers gate the lockout on the fresh count (not a stale
-// read taken at the start of the request).
-func (s *Store) IncFailedLogin(userID int64) (int, error) {
+// ConsumeTOTPStep records a TOTP code's time step as used, but only if it is
+// newer than the last one used — in one statement, so the same code submitted
+// twice at once passes at most once (and the step never moves backwards).
+// Returns whether this call consumed it.
+func (s *Store) ConsumeTOTPStep(userID, step int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE users SET totp_last_step=? WHERE id=? AND totp_last_step<?`, step, userID, step)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ClaimLoginAttempt atomically reserves one guess (password, TOTP or recovery
+// code) against the user's lockout budget BEFORE the guess is checked, so
+// parallel requests can't all slip past a stale "not locked" read. It returns
+// false when the account is locked. The claim counts as a failure up front:
+// the claim that reaches maxFailed also sets the lockout, and a correct guess
+// undoes its claim with ResetFailedLogin or RefundLoginAttempt. Once a lockout
+// has expired the count restarts.
+func (s *Store) ClaimLoginAttempt(userID int64, maxFailed int, window time.Duration) (bool, error) {
+	now := time.Now().UTC()
 	var n int
-	err := s.db.QueryRow(
-		`UPDATE users SET failed_logins=failed_logins+1 WHERE id=? RETURNING failed_logins`,
-		userID).Scan(&n)
-	return n, err
+	// SET expressions all see the pre-update row; the WHERE only admits an
+	// unlocked or expired-lock row, so a set locked_until here means "expired".
+	err := s.db.QueryRow(`
+		UPDATE users SET
+		  failed_logins = CASE WHEN locked_until<>'' THEN 1 ELSE failed_logins+1 END,
+		  locked_until  = CASE WHEN (CASE WHEN locked_until<>'' THEN 1 ELSE failed_logins+1 END) >= ?
+		                       THEN ? ELSE '' END
+		WHERE id=? AND (locked_until='' OR locked_until<=?)
+		RETURNING failed_logins`,
+		maxFailed, now.Add(window).Format(time.RFC3339), userID, now.Format(time.RFC3339)).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// RefundLoginAttempt gives back one claimed attempt after a correct password
+// for a user who still has to pass 2FA: the count drops by one (so earlier 2FA
+// failures still count) and a lockout this claim set is lifted.
+func (s *Store) RefundLoginAttempt(userID int64, maxFailed int) error {
+	_, err := s.db.Exec(`
+		UPDATE users SET
+		  failed_logins = MAX(failed_logins-1, 0),
+		  locked_until  = CASE WHEN failed_logins-1 < ? THEN '' ELSE locked_until END
+		WHERE id=?`, maxFailed, userID)
+	return err
 }
 
 func (s *Store) ResetFailedLogin(userID int64) error {
 	_, err := s.db.Exec(`UPDATE users SET failed_logins=0, locked_until='' WHERE id=?`, userID)
-	return err
-}
-
-func (s *Store) SetLockout(userID int64, until time.Time) error {
-	_, err := s.db.Exec(`UPDATE users SET locked_until=? WHERE id=?`,
-		until.UTC().Format(time.RFC3339), userID)
 	return err
 }
 
@@ -973,9 +1053,36 @@ func (s *Store) GetValidInvite(tokenHash string) (*Invite, error) {
 	return &iv, nil
 }
 
-func (s *Store) MarkInviteUsed(id int64) error {
-	_, err := s.db.Exec(`UPDATE invites SET used_at=? WHERE id=?`, nowRFC(), id)
-	return err
+// ErrInviteUsed is returned when an invite was already consumed or has expired.
+var ErrInviteUsed = errors.New("invite already used or expired")
+
+// AcceptInvite consumes an invite and creates its member account in one
+// transaction: the invite is claimed only if still unused and unexpired, and
+// the user is inserted only under the maxUsers cap. Either both happen or
+// neither, so concurrent submissions of one link create at most one account
+// (and a rejected username leaves the invite usable). Returns ErrInviteUsed,
+// ErrUserLimit, or a plain error (e.g. a taken username).
+func (s *Store) AcceptInvite(inviteID int64, username, passwordHash string, maxUsers int) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	now := nowRFC()
+	res, err := tx.Exec(`UPDATE invites SET used_at=? WHERE id=? AND used_at='' AND expires_at>?`, now, inviteID, now)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 0 {
+		return 0, ErrInviteUsed
+	}
+	uid, err := createUserCapped(tx, username, passwordHash, "member", maxUsers)
+	if err != nil {
+		return 0, err
+	}
+	return uid, tx.Commit()
 }
 
 // ListPendingInvites returns unused, unexpired invites (newest first).
@@ -1039,9 +1146,15 @@ func (s *Store) ListUnusedRecoveryCodes(userID int64) ([]RecoveryCode, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) MarkRecoveryCodeUsed(id int64) error {
-	_, err := s.db.Exec(`UPDATE recovery_codes SET used=1 WHERE id=?`, id)
-	return err
+// UseRecoveryCode marks a recovery code used, only if it still is unused, and
+// reports whether this call did — so one code can't pass twice concurrently.
+func (s *Store) UseRecoveryCode(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE recovery_codes SET used=1 WHERE id=? AND used=0`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // Sessions
@@ -1307,14 +1420,91 @@ func (s *Store) UpdateTransaction(id, accountID int64, date string, amount float
 	if categoryID != nil {
 		cat = *categoryID
 	}
-	_, err := s.db.Exec(
+	return s.changeTransaction(id,
 		`UPDATE transactions SET account_id=?, date=?, amount=?, category_id=?, payee=?, notes=? WHERE id=?`,
 		accountID, date, amount, cat, payee, notes, id)
-	return err
 }
 
+// DeleteTransaction removes a transaction. A transfer leg takes its partner leg
+// with it: deleting just one would leave the other moving a balance (and NAV) on
+// its own, invisible to the reports that skip transfer legs.
 func (s *Store) DeleteTransaction(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM transactions WHERE id=?`, id)
+	return s.changeTransaction(id,
+		`DELETE FROM transactions WHERE id=? OR transfer_id=(SELECT transfer_id FROM transactions WHERE id=?)`,
+		id, id)
+}
+
+// changeTransaction runs an edit/delete of transaction id and, when that row is
+// a project-item payment, re-derives the item's done state in the same
+// transaction (see syncItemStatus). A missing id is a no-op.
+func (s *Store) changeTransaction(id int64, query string, args ...any) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var itemID sql.NullInt64
+	err = tx.QueryRow(`SELECT project_item_id FROM transactions WHERE id=?`, id).Scan(&itemID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		return err
+	}
+	if itemID.Valid {
+		if err := syncItemStatus(tx, itemID.Int64); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// syncItemStatus re-derives a project item's done flag from its ledger payments
+// after one of them was edited or deleted. The paid total is always derived, but
+// purchased/actual_cost are stored when the item closes, so without this a
+// deleted payment would leave the item "done" with money still owed (and its
+// phase dropped from the monthly saving). Rules:
+//   - done, but the payments now total less than the closing total → reopen
+//     (a payment the closing counted is gone; re-close it with a new payment);
+//   - done and still covered → stay done, actual_cost follows the new total;
+//   - open, and an edit lifted the total to the estimate → close it.
+//
+// transaction_id is re-pointed at the latest remaining payment (or NULL).
+// Legacy items closed without a recorded closing total are left as they are.
+func syncItemStatus(tx *sql.Tx, itemID int64) error {
+	var estimated, paid float64
+	var purchased bool
+	var actual sql.NullFloat64
+	var latest sql.NullInt64
+	if err := tx.QueryRow(
+		`SELECT estimated_cost, purchased, actual_cost,
+		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0),
+		        (SELECT MAX(t.id) FROM transactions t WHERE t.project_item_id=project_items.id)
+		 FROM project_items WHERE id=?`, itemID).
+		Scan(&estimated, &purchased, &actual, &paid, &latest); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // item deleted; nothing to sync
+		}
+		return err
+	}
+	done := purchased
+	switch {
+	case purchased && !actual.Valid:
+		return nil // legacy close with no recorded total: nothing to compare against
+	case purchased && paid+0.005 < actual.Float64:
+		done = false
+	case !purchased && estimated > 0 && paid+0.005 >= estimated:
+		done = true
+	}
+	var actualCost any
+	if done {
+		actualCost = paid
+	}
+	_, err := tx.Exec(`UPDATE project_items SET purchased=?, actual_cost=?, transaction_id=? WHERE id=?`,
+		done, actualCost, latest, itemID)
 	return err
 }
 
@@ -1324,21 +1514,23 @@ func TxDedupKey(date string, amount float64, payee string) string {
 	return fmt.Sprintf("%s|%.2f|%s", date, amount, strings.ToLower(strings.TrimSpace(payee)))
 }
 
-// AccountTxKeys returns the set of dedup keys for an account's transactions.
-func (s *Store) AccountTxKeys(accountID int64) (map[string]bool, error) {
+// AccountTxKeys counts an account's transactions per dedup key, so an import
+// can skip exactly as many copies as already exist (two identical coffees on
+// one day are two transactions, not one).
+func (s *Store) AccountTxKeys(accountID int64) (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT date, amount, payee FROM transactions WHERE account_id=?`, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	out := map[string]int{}
 	for rows.Next() {
 		var d, p string
 		var a float64
 		if err := rows.Scan(&d, &a, &p); err != nil {
 			return nil, err
 		}
-		out[TxDedupKey(d, a, p)] = true
+		out[TxDedupKey(d, a, p)]++
 	}
 	return out, rows.Err()
 }
@@ -1352,9 +1544,14 @@ func (s *Store) Backup(path string) error {
 
 // CreateTransfer records a money move between two accounts as two balanced legs
 // (expense from `from`, income to `to`), atomically, sharing a transfer_id so
-// they're recognizable (and excluded from spend/income analytics). NAV is
-// unaffected. amount must be positive.
-func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, notes string) error {
+// they're recognizable (and excluded from spend/income analytics). Within one
+// currency NAV is unaffected. Both amounts must be positive.
+//
+// sent leaves `from` (in its currency) and received lands in `to` (in its);
+// they differ only between accounts in different currencies, where the gap is
+// the exchange rate (and any fee) — a same-currency transfer passes the same
+// amount twice.
+func (s *Store) CreateTransfer(fromID, toID int64, date string, sent, received float64, notes string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1363,7 +1560,7 @@ func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, 
 	now := nowRFC()
 	res, err := tx.Exec(
 		`INSERT INTO transactions(account_id, date, amount, payee, notes, created_at) VALUES(?,?,?,?,?,?)`,
-		fromID, date, -amount, "Transfer", notes, now)
+		fromID, date, -sent, "Transfer", notes, now)
 	if err != nil {
 		return err
 	}
@@ -1373,7 +1570,7 @@ func (s *Store) CreateTransfer(fromID, toID int64, date string, amount float64, 
 	}
 	res, err = tx.Exec(
 		`INSERT INTO transactions(account_id, date, amount, payee, notes, created_at) VALUES(?,?,?,?,?,?)`,
-		toID, date, amount, "Transfer", notes, now)
+		toID, date, received, "Transfer", notes, now)
 	if err != nil {
 		return err
 	}
@@ -1400,27 +1597,54 @@ type CategoryTotal struct {
 	Amount   float64 // total expense (positive)
 }
 
-// MonthlyTotals returns income/expense per calendar month, keyed by "YYYY-MM".
+// MonthlyTotals returns income/expense per calendar month, keyed by "YYYY-MM",
+// converted to EUR by each account's currency.
 func (s *Store) MonthlyTotals() (map[string]MonthTotal, error) {
+	rate, err := s.eurRate()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
-		SELECT substr(date,1,7) AS m,
-		       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),
-		       SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END)
-		FROM transactions WHERE transfer_id IS NULL
-		GROUP BY m`)
+		SELECT substr(t.date,1,7) AS m, a.currency,
+		       SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),
+		       SUM(CASE WHEN t.amount<0 THEN -t.amount ELSE 0 END)
+		FROM transactions t JOIN accounts a ON a.id=t.account_id
+		WHERE t.transfer_id IS NULL
+		GROUP BY m, a.currency`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]MonthTotal{}
 	for rows.Next() {
-		var t MonthTotal
-		if err := rows.Scan(&t.Month, &t.Income, &t.Expense); err != nil {
+		var m, ccy string
+		var inc, exp float64
+		if err := rows.Scan(&m, &ccy, &inc, &exp); err != nil {
 			return nil, err
 		}
-		out[t.Month] = t
+		t := out[m]
+		t.Month = m
+		t.Income += inc * rate(ccy)
+		t.Expense += exp * rate(ccy)
+		out[m] = t
 	}
 	return out, rows.Err()
+}
+
+// eurRate returns a converter from a currency code to its EUR rate, using the
+// stored fx_rates. A blank, unknown or non-positive rate counts as 1 (EUR) until
+// a rate is fetched.
+func (s *Store) eurRate() (func(ccy string) float64, error) {
+	rates, err := s.GetFXRates()
+	if err != nil {
+		return nil, err
+	}
+	return func(ccy string) float64 {
+		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
+			return r
+		}
+		return 1
+	}, nil
 }
 
 // CategorySpend returns this-period actual spend per transaction category, keyed
@@ -1429,15 +1653,9 @@ func (s *Store) MonthlyTotals() (map[string]MonthTotal, error) {
 // flagged as spending accounts — the dedicated operating-cost accounts. Used to
 // measure budgets (operating costs) against actuals.
 func (s *Store) CategorySpend(from, to string, spendingOnly bool) (map[int64]float64, error) {
-	rates, err := s.GetFXRates()
+	rate, err := s.eurRate()
 	if err != nil {
 		return nil, err
-	}
-	rate := func(ccy string) float64 {
-		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
-			return r
-		}
-		return 1
 	}
 	q := `SELECT t.category_id, a.currency, SUM(-t.amount)
 	      FROM transactions t JOIN accounts a ON a.id=t.account_id
@@ -1484,26 +1702,46 @@ func BudgetStatus(actual, budget float64) (pct int, state string) {
 }
 
 // SpendByCategory returns total expense per category over [from,to] (inclusive
-// YYYY-MM-DD), largest first.
+// YYYY-MM-DD), converted to EUR, largest first.
 func (s *Store) SpendByCategory(from, to string) ([]CategoryTotal, error) {
+	rate, err := s.eurRate()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
-		SELECT COALESCE(NULLIF(c.name,''),'Uncategorized') AS cat, SUM(-t.amount)
-		FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
+		SELECT COALESCE(NULLIF(c.name,''),'Uncategorized') AS cat, a.currency, SUM(-t.amount)
+		FROM transactions t
+		JOIN accounts a ON a.id=t.account_id
+		LEFT JOIN categories c ON c.id=t.category_id
 		WHERE t.amount<0 AND t.transfer_id IS NULL AND t.date>=? AND t.date<=?
-		GROUP BY cat ORDER BY SUM(-t.amount) DESC`, from, to)
+		GROUP BY cat, a.currency`, from, to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []CategoryTotal
+	sums := map[string]float64{}
 	for rows.Next() {
-		var c CategoryTotal
-		if err := rows.Scan(&c.Category, &c.Amount); err != nil {
+		var cat, ccy string
+		var sum float64
+		if err := rows.Scan(&cat, &ccy, &sum); err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		sums[cat] += sum * rate(ccy)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]CategoryTotal, 0, len(sums))
+	for cat, amt := range sums {
+		out = append(out, CategoryTotal{Category: cat, Amount: amt})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Amount != out[j].Amount {
+			return out[i].Amount > out[j].Amount
+		}
+		return out[i].Category < out[j].Category
+	})
+	return out, nil
 }
 
 // Holdings
@@ -1901,22 +2139,25 @@ func (s *Store) CountUnpurchasedItems(projectID int64) (int, error) {
 // purchased (done) when `final` is set or the cumulative payments reach the
 // estimate, so a deposit leaves it open while the closing payment completes it.
 func (s *Store) PayItem(itemID, accountID int64, date string, amount float64, categoryID *int64, final bool) error {
-	var projectID int64
-	var name string
-	var estimated, paid float64
-	// paid is the ledger-derived total so far (before the payment we're about to add).
-	if err := s.db.QueryRow(
-		`SELECT project_id, name, estimated_cost,
-		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0)
-		 FROM project_items WHERE id=?`, itemID).
-		Scan(&projectID, &name, &estimated, &paid); err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var projectID int64
+	var name string
+	var estimated, paid float64
+	var wasDone bool
+	// paid is the ledger-derived total so far (before the payment we're about to
+	// add). It's read inside the transaction so two concurrent payments can't both
+	// see the same old total and leave a fully paid item open.
+	if err := tx.QueryRow(
+		`SELECT project_id, name, estimated_cost, purchased,
+		        COALESCE((SELECT -SUM(t.amount) FROM transactions t WHERE t.project_item_id=project_items.id),0)
+		 FROM project_items WHERE id=?`, itemID).
+		Scan(&projectID, &name, &estimated, &wasDone, &paid); err != nil {
+		return err
+	}
 	var cat any
 	if categoryID != nil {
 		cat = *categoryID
@@ -1935,8 +2176,9 @@ func (s *Store) PayItem(itemID, accountID int64, date string, amount float64, ca
 	// Done when the user flags this the final payment, or (for an estimated item) the
 	// running total covers the estimate — within half a cent so float drift doesn't
 	// leave it a cent short. A zero-estimate item completes only on the explicit flag,
-	// so it can still take a deposit first.
-	done := final || (estimated > 0 && newPaid+0.005 >= estimated)
+	// so it can still take a deposit first. An item already closed stays closed (a
+	// late extra payment, or a double-submitted form, must not reopen it).
+	done := final || wasDone || (estimated > 0 && newPaid+0.005 >= estimated)
 	var actual any // actual_cost: the final total once done, else NULL (in progress)
 	purchased := 0
 	if done {
@@ -1980,18 +2222,9 @@ func (s *Store) ListItemPayments(itemID int64) ([]Transaction, error) {
 // ComputeNAV returns (cash, investments, total). v1 treats all amounts as the
 // base currency (EUR); multi-currency conversion arrives with a later release.
 func (s *Store) ComputeNAV() (cash, investments, total float64, err error) {
-	rates, err := s.GetFXRates()
+	rate, err := s.eurRate()
 	if err != nil {
 		return 0, 0, 0, err
-	}
-	rate := func(ccy string) float64 {
-		if ccy == "" {
-			return 1
-		}
-		if r, ok := rates[strings.ToUpper(ccy)]; ok && r > 0 {
-			return r
-		}
-		return 1 // unknown currency: treat as EUR until a rate is fetched
 	}
 	accts, err := s.ListAccounts()
 	if err != nil {

@@ -2,6 +2,8 @@ package model
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -97,11 +99,12 @@ func TestDedupAndBackup(t *testing.T) {
 	if TxDedupKey("2026-05-10", -12.50, " lidl ") != TxDedupKey("2026-05-10", -12.5, "Lidl") {
 		t.Error("TxDedupKey should normalize payee case/space and amount")
 	}
+	_ = s.CreateTransaction(acct, "2026-05-10", -12.50, nil, "LIDL", "") // a genuine second one
 	keys, _ := s.AccountTxKeys(acct)
-	if !keys[TxDedupKey("2026-05-10", -12.50, "Lidl")] {
-		t.Errorf("existing tx key not found: %v", keys)
+	if n := keys[TxDedupKey("2026-05-10", -12.50, "Lidl")]; n != 2 {
+		t.Errorf("existing tx key count = %d want 2: %v", n, keys)
 	}
-	if keys[TxDedupKey("2026-05-11", -12.50, "Lidl")] {
+	if keys[TxDedupKey("2026-05-11", -12.50, "Lidl")] != 0 {
 		t.Error("non-existent key should be absent")
 	}
 
@@ -143,7 +146,7 @@ func TestSpendingAnalytics(t *testing.T) {
 	_ = s.CreateTransaction(acct, "2026-05-12", -100, catID("Groceries"), "Lidl", "")
 	_ = s.CreateTransaction(acct, "2026-05-15", -50, catID("Groceries"), "Aldi", "")
 	_ = s.CreateTransaction(acct, "2026-05-20", -40, catID("Dining"), "Pizza", "")
-	_ = s.CreateTransfer(acct, sav, "2026-05-25", 200, "savings move") // must be excluded
+	_ = s.CreateTransfer(acct, sav, "2026-05-25", 200, 200, "savings move") // must be excluded
 
 	m, _ := s.MonthlyTotals()
 	if may := m["2026-05"]; may.Income != 3000 || may.Expense != 190 {
@@ -169,7 +172,7 @@ func TestCreateTransfer(t *testing.T) {
 			bID = a.ID
 		}
 	}
-	if err := s.CreateTransfer(aID, bID, "2026-06-01", 250, "rent pot"); err != nil {
+	if err := s.CreateTransfer(aID, bID, "2026-06-01", 250, 250, "rent pot"); err != nil {
 		t.Fatal(err)
 	}
 	accts, _ = s.ListAccounts()
@@ -190,6 +193,54 @@ func TestCreateTransfer(t *testing.T) {
 	}
 	if _, _, total, _ := s.ComputeNAV(); total != 1000 {
 		t.Errorf("NAV = %v want 1000 (transfer is net-zero)", total)
+	}
+}
+
+// Deleting either leg of a transfer removes both, so NAV can't drift; ordinary
+// transactions still delete one row at a time.
+func TestDeleteTransferLegRemovesBoth(t *testing.T) {
+	s := testStore(t)
+	_ = s.CreateAccount("A", "savings", "EUR", 1000, false)
+	_ = s.CreateAccount("B", "savings", "EUR", 0, false)
+	accts, _ := s.ListAccounts()
+	aID, bID := accts[0].ID, accts[1].ID
+	if err := s.CreateTransfer(aID, bID, "2026-06-01", 300, 300, ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.CreateTransaction(aID, "2026-06-02", -20, nil, "Coffee", "")
+	_ = s.CreateTransaction(aID, "2026-06-03", -30, nil, "Lunch", "")
+
+	txs, _ := s.ListTransactions(10)
+	var leg, coffee int64
+	for _, tx := range txs {
+		if tx.TransferID.Valid && tx.Amount < 0 {
+			leg = tx.ID
+		}
+		if tx.Payee == "Coffee" {
+			coffee = tx.ID
+		}
+	}
+	if err := s.DeleteTransaction(leg); err != nil {
+		t.Fatal(err)
+	}
+	txs, _ = s.ListTransactions(10)
+	for _, tx := range txs {
+		if tx.TransferID.Valid {
+			t.Errorf("orphaned transfer leg left behind: %+v", tx)
+		}
+	}
+	if len(txs) != 2 {
+		t.Errorf("txs = %d want 2 (both legs gone, other rows kept)", len(txs))
+	}
+	if _, _, total, _ := s.ComputeNAV(); total != 950 {
+		t.Errorf("NAV = %v want 950 (1000 - 20 - 30, transfer fully undone)", total)
+	}
+
+	if err := s.DeleteTransaction(coffee); err != nil {
+		t.Fatal(err)
+	}
+	if txs, _ = s.ListTransactions(10); len(txs) != 1 || txs[0].Payee != "Lunch" {
+		t.Errorf("deleting a plain transaction removed the wrong rows: %+v", txs)
 	}
 }
 
@@ -410,7 +461,7 @@ func TestSpendingAccountsAndCategorySpend(t *testing.T) {
 
 func TestBuildBurnDown(t *testing.T) {
 	// €100k, +€2k/mo, a €80k spend at month 2, over 4 months.
-	pts := BuildBurnDown(100000, 2000, nil, map[int]float64{2: 80000}, 4)
+	pts := BuildBurnDown(100000, 2000, nil, nil, map[int]float64{2: 80000}, 4)
 	want := []float64{100000, 102000, 24000, 26000, 28000} // m0..m4
 	if len(pts) != len(want) {
 		t.Fatalf("len = %d want %d", len(pts), len(want))
@@ -425,14 +476,14 @@ func TestBuildBurnDown(t *testing.T) {
 	}
 
 	// Overspending drives the balance negative (a useful signal, not an error).
-	neg := BuildBurnDown(1000, 0, nil, map[int]float64{1: 5000}, 2)
+	neg := BuildBurnDown(1000, 0, nil, nil, map[int]float64{1: 5000}, 2)
 	if neg[1].Balance != -4000 {
 		t.Errorf("negative balance = %v want -4000", neg[1].Balance)
 	}
 
 	// Recurring per-month outflows (upcoming loan repayments) draw the balance
 	// down without registering as lump-spend dots.
-	withOuts := BuildBurnDown(10000, 1000, map[int]float64{2: 400, 3: 400}, nil, 3)
+	withOuts := BuildBurnDown(10000, 1000, nil, map[int]float64{2: 400, 3: 400}, nil, 3)
 	wantOuts := []float64{10000, 11000, 11600, 12200} // +1000, then +600 net
 	for i, w := range wantOuts {
 		if withOuts[i].Balance != w {
@@ -441,6 +492,15 @@ func TestBuildBurnDown(t *testing.T) {
 	}
 	if withOuts[2].Spend != 0 {
 		t.Errorf("recurring outflow must not appear as a spend dot, got %v", withOuts[2].Spend)
+	}
+
+	// Per-month inflows (project saving set aside) add to the balance.
+	withIns := BuildBurnDown(1000, 100, map[int]float64{1: 500, 2: 500}, nil, map[int]float64{2: 1000}, 3)
+	wantIns := []float64{1000, 1600, 1200, 1300} // +600, +600−1000, +100
+	for i, w := range wantIns {
+		if withIns[i].Balance != w {
+			t.Errorf("ins month %d balance = %v want %v", i, withIns[i].Balance, w)
+		}
 	}
 }
 
@@ -747,6 +807,33 @@ func TestComputePlan(t *testing.T) {
 	nd := ComputePlan(1000, 0, 25, 0, "", now)
 	if nd.Overdue || nd.MonthlyToSave != 750 {
 		t.Errorf("no-date plan = %+v", nd)
+	}
+
+	// Payments draw the financed share first: €10k, 40% financed, €3k paid →
+	// still €6k to save; €8k paid → only €2k left to save.
+	p3 := ComputePlan(10000, 3000, 40, 0, "2026-12-01", now)
+	if !approx(p3.ToSave, 6000) || !approx(p3.MonthlyToSave, 1000) {
+		t.Errorf("3k paid: toSave %v monthly %v want 6000 / 1000", p3.ToSave, p3.MonthlyToSave)
+	}
+	p8 := ComputePlan(10000, 8000, 40, 0, "2026-12-01", now)
+	if !approx(p8.ToSave, 2000) || !approx(p8.MonthlyToSave, 2000.0/6) {
+		t.Errorf("8k paid: toSave %v monthly %v want 2000 / 333.33", p8.ToSave, p8.MonthlyToSave)
+	}
+	// An overdue phase that's 90% paid asks for the unpaid 10%, not its whole budget.
+	odp := ComputePlan(10000, 9000, 0, 0, "2026-01-01", now)
+	if !odp.Overdue || odp.MonthlyToSave != 1000 || odp.ToSave != 1000 {
+		t.Errorf("overdue, 9k of 10k paid = %+v want 1000 due now", odp)
+	}
+	// An out-of-range finance % (stored before the form validated it) is clamped.
+	if over := ComputePlan(1000, 0, 150, 0, "2026-12-01", now); over.Financed != 1000 || over.ToSave != 0 {
+		t.Errorf("finance 150%% = %+v want financed 1000, nothing to save", over)
+	}
+	if under := ComputePlan(1000, 0, -50, 0, "2026-12-01", now); under.Financed != 0 || under.ToSave != 1000 {
+		t.Errorf("finance -50%% = %+v want financed 0, save 1000", under)
+	}
+	// Overpaid never goes negative.
+	if op := ComputePlan(1000, 1200, 0, 0, "2026-12-01", now); op.ToSave != 0 || op.MonthlyToSave != 0 {
+		t.Errorf("overpaid plan = %+v want nothing to save", op)
 	}
 }
 
@@ -1101,7 +1188,7 @@ func TestInviteLifecycle(t *testing.T) {
 	}
 
 	// Single-use: once consumed it no longer validates.
-	if err := s.MarkInviteUsed(iv.ID); err != nil {
+	if _, err := s.AcceptInvite(iv.ID, "member1", "h", 5); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetValidInvite("hash-good"); err == nil {
@@ -1120,26 +1207,161 @@ func TestInviteLifecycle(t *testing.T) {
 	}
 }
 
-func TestIncFailedLoginReturnsCount(t *testing.T) {
+// parallel runs fn n times concurrently (released together) and returns how
+// many calls reported true.
+func parallel(t *testing.T, n int, fn func(i int) (bool, error)) int {
+	t.Helper()
+	type res struct {
+		ok  bool
+		err error
+	}
+	out := make(chan res, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			<-start
+			ok, err := fn(i)
+			out <- res{ok, err}
+		}(i)
+	}
+	close(start)
+	wins := 0
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("call failed: %v", r.err)
+		}
+		if r.ok {
+			wins++
+		}
+	}
+	return wins
+}
+
+// Only maxFailed attempts can be claimed, however many arrive at once; the
+// claim that reaches the limit sets the lockout; an expired lockout restarts
+// the count; a refund lifts a lockout its own claim set.
+func TestClaimLoginAttempt(t *testing.T) {
 	s := testStore(t)
-	uid, err := s.CreateUser("u", "h", "member")
-	if err != nil {
+	uid, _ := s.CreateUser("u", "h", "member")
+	won := parallel(t, 40, func(int) (bool, error) { return s.ClaimLoginAttempt(uid, 5, time.Minute) })
+	if won != 5 {
+		t.Errorf("parallel claims granted = %d want 5", won)
+	}
+	u, _ := s.GetUserByID(uid)
+	if u.FailedLogins != 5 || u.LockedUntil == "" {
+		t.Errorf("after the limit: failed=%d locked_until=%q want 5 and a lockout", u.FailedLogins, u.LockedUntil)
+	}
+
+	// Expired lockout: the next claim succeeds and restarts the count at 1.
+	if _, err := s.db.Exec(`UPDATE users SET locked_until=? WHERE id=?`,
+		time.Now().Add(-time.Second).UTC().Format(time.RFC3339), uid); err != nil {
 		t.Fatal(err)
 	}
-	for want := 1; want <= 3; want++ {
-		got, err := s.IncFailedLogin(uid)
-		if err != nil {
-			t.Fatalf("IncFailedLogin: %v", err)
-		}
-		if got != want {
-			t.Errorf("IncFailedLogin #%d returned %d, want %d", want, got, want)
-		}
+	if ok, _ := s.ClaimLoginAttempt(uid, 5, time.Minute); !ok {
+		t.Fatal("claim refused after the lockout expired")
+	}
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 1 || u.LockedUntil != "" {
+		t.Errorf("after expiry: failed=%d locked_until=%q want 1 and unlocked", u.FailedLogins, u.LockedUntil)
+	}
+
+	// Count at 4, a correct-password claim takes it to 5 (locking); its refund
+	// returns to 4 and lifts that lock.
+	_ = s.ResetFailedLogin(uid)
+	for i := 0; i < 5; i++ {
+		_, _ = s.ClaimLoginAttempt(uid, 5, time.Minute)
+	}
+	_ = s.RefundLoginAttempt(uid, 5)
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 4 || u.LockedUntil != "" {
+		t.Errorf("after refund: failed=%d locked_until=%q want 4 and unlocked", u.FailedLogins, u.LockedUntil)
 	}
 	if err := s.ResetFailedLogin(uid); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.IncFailedLogin(uid); got != 1 {
-		t.Errorf("after reset, IncFailedLogin returned %d, want 1", got)
+	if u, _ = s.GetUserByID(uid); u.FailedLogins != 0 || u.LockedUntil != "" {
+		t.Errorf("after reset: %+v", u)
+	}
+}
+
+// One TOTP step / one recovery code can be consumed exactly once, even by
+// simultaneous requests, and the step never moves backwards.
+func TestOneTimeCodesConsumedOnce(t *testing.T) {
+	s := testStore(t)
+	uid, _ := s.CreateUser("u", "h", "member")
+	if won := parallel(t, 10, func(int) (bool, error) { return s.ConsumeTOTPStep(uid, 1000) }); won != 1 {
+		t.Errorf("same TOTP step consumed %d times want 1", won)
+	}
+	if ok, _ := s.ConsumeTOTPStep(uid, 999); ok {
+		t.Error("an older step was accepted after a newer one")
+	}
+	if ok, _ := s.ConsumeTOTPStep(uid, 1001); !ok {
+		t.Error("the next step was refused")
+	}
+
+	if err := s.StoreRecoveryCodes(uid, []string{"rc-hash"}); err != nil {
+		t.Fatal(err)
+	}
+	rcs, _ := s.ListUnusedRecoveryCodes(uid)
+	if won := parallel(t, 10, func(int) (bool, error) { return s.UseRecoveryCode(rcs[0].ID) }); won != 1 {
+		t.Errorf("recovery code used %d times want 1", won)
+	}
+}
+
+// One invite link creates one account however many times it is submitted at
+// once, and never past the user cap; a rejected username leaves it usable.
+func TestAcceptInviteOnceAndCapped(t *testing.T) {
+	s := testStore(t)
+	admin, _ := s.CreateUser("admin", "h", "admin")
+	_ = s.CreateInvite("one", "x", admin, time.Now().Add(time.Hour))
+	iv, _ := s.GetValidInvite("one")
+	won := parallel(t, 5, func(i int) (bool, error) {
+		_, err := s.AcceptInvite(iv.ID, fmt.Sprintf("m%d", i), "h", 10)
+		if errors.Is(err, ErrInviteUsed) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if n, _ := s.CountUsers(); won != 1 || n != 2 {
+		t.Errorf("one invite x5 concurrent: %d accepted, %d users; want 1 and 2", won, n)
+	}
+
+	// Taken username: rolled back, invite still valid.
+	_ = s.CreateInvite("two", "y", admin, time.Now().Add(time.Hour))
+	iv2, _ := s.GetValidInvite("two")
+	if _, err := s.AcceptInvite(iv2.ID, "admin", "h", 10); err == nil {
+		t.Fatal("duplicate username accepted")
+	}
+	if _, err := s.GetValidInvite("two"); err != nil {
+		t.Errorf("invite consumed by a failed sign-up: %v", err)
+	}
+	// Cap: 2 users exist, cap 2 → refused, invite kept.
+	if _, err := s.AcceptInvite(iv2.ID, "m9", "h", 2); !errors.Is(err, ErrUserLimit) {
+		t.Errorf("over the cap: err %v want ErrUserLimit", err)
+	}
+	if _, err := s.GetValidInvite("two"); err != nil {
+		t.Errorf("invite consumed by a capped sign-up: %v", err)
+	}
+	// Expired invites can't be claimed.
+	_ = s.CreateInvite("old", "z", admin, time.Now().Add(-time.Hour))
+	var oldID int64
+	_ = s.db.QueryRow(`SELECT id FROM invites WHERE token_hash='old'`).Scan(&oldID)
+	if _, err := s.AcceptInvite(oldID, "m8", "h", 10); !errors.Is(err, ErrInviteUsed) {
+		t.Errorf("expired invite: err %v want ErrInviteUsed", err)
+	}
+}
+
+// Concurrent bootstrap registrations create a single admin.
+func TestCreateUserCappedConcurrent(t *testing.T) {
+	s := testStore(t)
+	won := parallel(t, 5, func(i int) (bool, error) {
+		_, err := s.CreateUserCapped(fmt.Sprintf("a%d", i), "h", "admin", 1)
+		if errors.Is(err, ErrUserLimit) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if n, _ := s.CountUsers(); won != 1 || n != 1 {
+		t.Errorf("concurrent first sign-ups: %d created, %d users; want 1", won, n)
 	}
 }
 
@@ -1362,5 +1584,171 @@ func TestDepositPaidDateIgnoresRefunds(t *testing.T) {
 	}
 	if p.DepositPaidDate != "2026-08-20" {
 		t.Errorf("DepositPaidDate = %q want 2026-08-20 (the real payment, not the refund)", p.DepositPaidDate)
+	}
+}
+
+// Insights/savings-rate aggregates must be in EUR, like NAV and CategorySpend:
+// a −£100 spend at 1.15 is €115, not 100.
+func TestMonthlyTotalsAndSpendByCategoryConvertToEUR(t *testing.T) {
+	s := testStore(t)
+	_ = s.EnsureDefaultCategories()
+	_ = s.CreateAccount("EUR acct", "checking", "EUR", 0, false)
+	_ = s.CreateAccount("GBP acct", "checking", "GBP", 0, false)
+	if err := s.UpsertFXRate("GBP", 1.15); err != nil {
+		t.Fatal(err)
+	}
+	var eurID, gbpID int64
+	accts, _ := s.ListAccounts()
+	for _, a := range accts {
+		if a.Currency == "GBP" {
+			gbpID = a.ID
+		} else {
+			eurID = a.ID
+		}
+	}
+	var groceries *int64
+	cats, _ := s.ListCategories()
+	for _, c := range cats {
+		if c.Name == "Groceries" {
+			id := c.ID
+			groceries = &id
+		}
+	}
+	_ = s.CreateTransaction(eurID, "2026-05-01", 2000, nil, "Salary", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-02", 1000, nil, "UK pay", "")
+	_ = s.CreateTransaction(eurID, "2026-05-10", -50, groceries, "Lidl", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-11", -100, groceries, "Tesco", "")
+	_ = s.CreateTransaction(gbpID, "2026-05-12", -20, nil, "Pub", "")
+
+	m, err := s.MonthlyTotals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := func(a, b float64) bool { return a-b < 0.001 && b-a < 0.001 }
+	if may := m["2026-05"]; !near(may.Income, 3150) || !near(may.Expense, 188) || may.Month != "2026-05" {
+		t.Errorf("May totals = %+v want income 3150 / expense 188 (50 + 115 + 23)", may)
+	}
+
+	ct, err := s.SpendByCategory("2026-05-01", "2026-05-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ct) != 2 || ct[0].Category != "Groceries" || !near(ct[0].Amount, 165) ||
+		ct[1].Category != "Uncategorized" || !near(ct[1].Amount, 23) {
+		t.Errorf("SpendByCategory = %+v want Groceries 165 (merged across currencies), Uncategorized 23", ct)
+	}
+}
+
+// itemFixture makes an account and a project with one item of the given estimate.
+func itemFixture(t *testing.T, s *Store, estimate float64) (acctID, itemID int64) {
+	t.Helper()
+	if err := s.CreateAccount("Bank", "savings", "EUR", 10000, false); err != nil {
+		t.Fatal(err)
+	}
+	accts, _ := s.ListAccounts()
+	pid, err := s.CreateProjectInput(ProjectInput{Name: "Kitchen", TargetDate: "2026-12-01", Status: "saving", FinanceMethod: "save"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateProjectItem(pid, nil, "Oven", estimate, true); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := s.ListProjectItems(pid)
+	return accts[0].ID, items[0].ID
+}
+
+// The done flag must follow the ledger: deleting or shrinking a payment that the
+// closing counted reopens the item; editing it back up closes it again.
+func TestItemStatusFollowsPaymentEditsAndDeletes(t *testing.T) {
+	s := testStore(t)
+	acct, item := itemFixture(t, s, 500)
+	_ = s.PayItem(item, acct, "2026-06-01", 200, nil, false)
+	_ = s.PayItem(item, acct, "2026-07-01", 300, nil, false)
+	it, _ := s.GetProjectItem(item)
+	if !it.Purchased || !it.ActualCost.Valid || it.ActualCost.Float64 != 500 {
+		t.Fatalf("after 200+300 of 500: %+v want purchased, actual 500", it)
+	}
+	pays, _ := s.ListItemPayments(item)
+	var p200, p300 int64
+	for _, p := range pays {
+		if p.Amount == -200 {
+			p200 = p.ID
+		} else {
+			p300 = p.ID
+		}
+	}
+
+	if err := s.DeleteTransaction(p300); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = s.GetProjectItem(item)
+	if it.Purchased || it.ActualCost.Valid || it.AmountPaid != 200 {
+		t.Errorf("after deleting the 300: %+v want open, actual NULL, paid 200", it)
+	}
+	if !it.TransactionID.Valid || it.TransactionID.Int64 != p200 {
+		t.Errorf("transaction_id = %+v want the remaining payment %d", it.TransactionID, p200)
+	}
+	if n, _ := s.CountUnpurchasedItems(it.ProjectID); n != 1 {
+		t.Errorf("unpurchased items = %d want 1", n)
+	}
+
+	// Editing the remaining payment up to the estimate closes the item again.
+	if err := s.UpdateTransaction(p200, acct, "2026-06-01", -500, nil, "Oven", ""); err != nil {
+		t.Fatal(err)
+	}
+	it, _ = s.GetProjectItem(item)
+	if !it.Purchased || it.ActualCost.Float64 != 500 {
+		t.Errorf("after editing to 500: %+v want purchased, actual 500", it)
+	}
+	// An edit that keeps it covered moves actual_cost with it.
+	_ = s.UpdateTransaction(p200, acct, "2026-06-01", -520, nil, "Oven", "")
+	if it, _ = s.GetProjectItem(item); !it.Purchased || it.ActualCost.Float64 != 520 {
+		t.Errorf("after editing to 520: %+v want purchased, actual 520", it)
+	}
+
+	// Deleting the last payment fully reopens the item.
+	_ = s.DeleteTransaction(p200)
+	it, _ = s.GetProjectItem(item)
+	if it.Purchased || it.ActualCost.Valid || it.TransactionID.Valid || it.AmountPaid != 0 {
+		t.Errorf("after deleting every payment: %+v want open with no payments", it)
+	}
+}
+
+// An item closed early with "final" stays closed when a further, non-final
+// payment arrives (e.g. a double-submitted form) — it must not reopen.
+func TestPayItemKeepsClosedItemClosed(t *testing.T) {
+	s := testStore(t)
+	acct, item := itemFixture(t, s, 100)
+	_ = s.PayItem(item, acct, "2026-06-01", 60, nil, true)
+	_ = s.PayItem(item, acct, "2026-06-02", 10, nil, false)
+	it, _ := s.GetProjectItem(item)
+	if !it.Purchased || it.ActualCost.Float64 != 70 {
+		t.Errorf("closed item after an extra payment: %+v want purchased, actual 70", it)
+	}
+}
+
+// Concurrent payments must see each other's totals: two halves of the estimate
+// paid at once leave the item fully paid AND closed.
+func TestPayItemConcurrentPaymentsClose(t *testing.T) {
+	for run := 0; run < 20; run++ {
+		s := testStore(t)
+		acct, item := itemFixture(t, s, 100)
+		errs := make(chan error, 2)
+		start := make(chan struct{})
+		for i := 0; i < 2; i++ {
+			go func() {
+				<-start
+				errs <- s.PayItem(item, acct, "2026-06-01", 50, nil, false)
+			}()
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if it, _ := s.GetProjectItem(item); it.AmountPaid != 100 || !it.Purchased {
+			t.Fatalf("run %d: %+v want paid 100 and purchased", run, it)
+		}
 	}
 }

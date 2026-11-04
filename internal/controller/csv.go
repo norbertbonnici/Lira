@@ -9,11 +9,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"lira/internal/model"
 )
 
 const csvMaxBytes = 5 << 20 // 5 MB
+
+// ImportBodyLimit is the request-body cap main applies to the import routes
+// (everything else gets a much smaller default). The commit form re-posts the
+// whole CSV URL-encoded, which can grow it up to 3× (every byte "%XX"), plus
+// room for the other form fields.
+const ImportBodyLimit = 3*csvMaxBytes + 64<<10
 
 // dateLayouts offered for import (Go reference-time layouts).
 var dateLayouts = []struct{ Value, Label string }{
@@ -60,31 +67,96 @@ func parseCSVDate(value, layout string) (string, bool) {
 }
 
 // parseCSVAmount parses a monetary string. With decimalComma, ',' is the decimal
-// separator and '.' is thousands; otherwise the reverse. Strips currency symbols
-// and spaces, and treats parenthesised values as negative (accounting style).
+// separator and '.' is thousands; otherwise the reverse. Accepts currency symbols,
+// a 3-letter currency code, spaces/apostrophes as digit grouping, a leading or
+// trailing minus (ASCII or U+2212), parentheses (accounting negative) and a DR/CR
+// suffix (DR = money out).
+//
+// It refuses anything it would otherwise have to guess at, rather than import a
+// wrong number: a thousands separator not followed by exactly 3 digits ("12,50"
+// without decimalComma — almost certainly a decimal comma, which would otherwise
+// become 1250), a separator after the decimal point ("1.234,56" without
+// decimalComma), stray letters ("1e3"), or more than one sign.
 func parseCSVAmount(value string, decimalComma bool) (float64, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	s := strings.TrimSpace(value)
+	neg := false
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		neg, s = true, strings.TrimSpace(s[1:len(s)-1])
+	}
+	// Peel a trailing then a leading run of ASCII letters: a DR/CR marker or a
+	// 3-letter currency code. Any other letters make the value unparseable.
+	trail := len(s)
+	for trail > 0 && isASCIILetter(s[trail-1]) {
+		trail--
+	}
+	switch suffix := strings.ToUpper(s[trail:]); {
+	case suffix == "DR":
+		neg = true
+	case suffix == "" || suffix == "CR" || len(suffix) == 3:
+	default:
 		return 0, false
 	}
-	neg := false
-	if strings.HasPrefix(value, "(") && strings.HasSuffix(value, ")") {
-		neg, value = true, value[1:len(value)-1]
+	s = s[:trail]
+	lead := 0
+	for lead < len(s) && isASCIILetter(s[lead]) {
+		lead++
 	}
+	if lead != 0 && lead != 3 {
+		return 0, false
+	}
+	s = s[lead:]
+
 	var b strings.Builder
-	for _, r := range value {
-		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '-' || r == '+' {
+	for _, r := range s {
+		switch {
+		case (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '+' || r == '-':
 			b.WriteRune(r)
+		case r == '\u2212': // typographic minus
+			b.WriteByte('-')
+		case unicode.IsSpace(r) || r == '\'' || r == '\u2019' || unicode.Is(unicode.Sc, r):
+			// digit grouping or a currency symbol
+		default:
+			return 0, false
 		}
 	}
-	s := b.String()
-	if decimalComma {
-		s = strings.ReplaceAll(s, ".", "")
-		s = strings.ReplaceAll(s, ",", ".")
-	} else {
-		s = strings.ReplaceAll(s, ",", "")
+	num := b.String()
+	if n := len(num); n > 0 && (num[0] == '-' || num[0] == '+') {
+		neg = neg || num[0] == '-'
+		num = num[1:]
+	} else if n > 0 && num[n-1] == '-' { // "12.00-"
+		neg, num = true, num[:n-1]
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	if strings.ContainsAny(num, "+-") {
+		return 0, false
+	}
+
+	dec, grp := ".", ","
+	if decimalComma {
+		dec, grp = ",", "."
+	}
+	intPart, frac, hasDec := strings.Cut(num, dec)
+	if strings.Contains(frac, dec) || strings.Contains(frac, grp) {
+		return 0, false
+	}
+	if strings.Contains(intPart, grp) {
+		groups := strings.Split(intPart, grp)
+		if len(groups[0]) < 1 || len(groups[0]) > 3 {
+			return 0, false
+		}
+		for _, g := range groups[1:] {
+			if len(g) != 3 {
+				return 0, false
+			}
+		}
+		intPart = strings.Join(groups, "")
+	}
+	if intPart == "" && frac == "" {
+		return 0, false
+	}
+	if hasDec {
+		intPart += "." + frac
+	}
+	f, err := strconv.ParseFloat(intPart, 64)
 	if err != nil {
 		return 0, false
 	}
@@ -94,6 +166,18 @@ func parseCSVAmount(value string, decimalComma bool) (float64, bool) {
 	return f, true
 }
 
+func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
+
+// blankAmount reports an empty amount cell, or the lone-dash placeholder some
+// banks put in the unused debit/credit column.
+func blankAmount(s string) bool {
+	switch s {
+	case "", "-", "\u2013", "\u2014":
+		return true
+	}
+	return false
+}
+
 // ---------- export ----------
 
 func writeCSV(w http.ResponseWriter, filename string, header []string, rows [][]string) {
@@ -101,8 +185,45 @@ func writeCSV(w http.ResponseWriter, filename string, header []string, rows [][]
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	_ = cw.Write(header)
+	for _, row := range rows {
+		for i := range row {
+			row[i] = csvSafe(row[i])
+		}
+	}
 	_ = cw.WriteAll(rows)
 	cw.Flush()
+}
+
+// csvSafe defuses spreadsheet formula injection: a text cell starting with
+// = + - @ (or a tab/CR) is run as a formula when the export is opened in Excel
+// or Sheets, and payees/notes come from bank CSVs, i.e. third-party text. Such
+// cells get a leading apostrophe (shown as text, not evaluated). Plain numbers
+// like "-12.50" are left alone so amounts stay numeric.
+func csvSafe(s string) string {
+	if s == "" || !strings.ContainsRune("=+-@\t\r", rune(s[0])) || isPlainNumber(s) {
+		return s
+	}
+	return "'" + s
+}
+
+// isPlainNumber reports a decimal like "-12.50" or "+3": sign, digits, at most
+// one dot — nothing a spreadsheet could read as a formula.
+func isPlainNumber(s string) bool {
+	if s[0] == '-' || s[0] == '+' {
+		s = s[1:]
+	}
+	digits, dots := 0, 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && dots <= 1
 }
 
 func f2(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
@@ -157,20 +278,29 @@ func (c *Controller) uploadError(w http.ResponseWriter, r *http.Request, msg str
 }
 
 func (c *Controller) ImportPreview(w http.ResponseWriter, r *http.Request) {
-	if !c.checkCSRF(r) {
-		http.Error(w, "invalid CSRF token", http.StatusForbidden)
-		return
-	}
+	// Parse the upload BEFORE checkCSRF reads a form field: that read would parse
+	// it with Go's 32 MB default instead, and an oversized upload would surface
+	// as a confusing CSRF error. The body itself is capped by main
+	// (ImportBodyLimit). On failure the token is unreadable, but re-showing the
+	// upload page changes nothing, so it needs no CSRF check.
 	if err := r.ParseMultipartForm(csvMaxBytes); err != nil {
 		c.uploadError(w, r, "Upload too large or malformed (max 5 MB).")
 		return
 	}
-	file, _, err := r.FormFile("file")
+	if !c.checkCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		c.uploadError(w, r, "Please choose a CSV file.")
 		return
 	}
 	defer file.Close()
+	if hdr.Size > csvMaxBytes { // refuse rather than silently import a truncated file
+		c.uploadError(w, r, "That file is over 5 MB — split it and import the parts.")
+		return
+	}
 	data, _ := io.ReadAll(io.LimitReader(file, csvMaxBytes))
 	delim := r.FormValue("delim")
 	records, err := csvRecords(string(data), delim)
@@ -218,7 +348,12 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
-	records, err := csvRecords(r.FormValue("csv"), r.FormValue("delim"))
+	raw := r.FormValue("csv")
+	if len(raw) > csvMaxBytes {
+		c.uploadError(w, r, "Upload too large (max 5 MB).")
+		return
+	}
+	records, err := csvRecords(raw, r.FormValue("delim"))
 	if err != nil || len(records) == 0 {
 		http.Redirect(w, r, "/transactions/import", http.StatusSeeOther)
 		return
@@ -244,12 +379,15 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		catByName[strings.ToLower(ct.Name)] = ct.ID
 	}
 
-	// Duplicate detection: skip rows already in the account (and within this file).
+	// Duplicate detection: skip a row only while the account still holds an
+	// unmatched copy of it. Counting (not a yes/no set) keeps genuine repeats —
+	// two €3.50 coffees on one day — while re-importing the same file adds
+	// nothing.
 	skipDupes := r.FormValue("skip_dupes") != ""
-	seen := map[string]bool{}
+	existing := map[string]int{}
 	if skipDupes {
 		if keys, err := c.store.AccountTxKeys(accountID); err == nil {
-			seen = keys
+			existing = keys
 		}
 	}
 
@@ -276,20 +414,30 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var amount float64
-		var aok bool
+		var aok, bad bool // bad: a non-blank amount cell that didn't parse
 		if debitCredit {
-			if d := get(row, debitCol); d != "" {
+			if d := get(row, debitCol); !blankAmount(d) {
 				if v, vok := parseCSVAmount(d, decimalComma); vok {
 					amount, aok = amount-absf(v), true
+				} else {
+					bad = true
 				}
 			}
-			if cr := get(row, creditCol); cr != "" {
+			if cr := get(row, creditCol); !blankAmount(cr) {
 				if v, vok := parseCSVAmount(cr, decimalComma); vok {
 					amount, aok = amount+absf(v), true
+				} else {
+					bad = true
 				}
 			}
-		} else {
-			amount, aok = parseCSVAmount(get(row, amountCol), decimalComma)
+		} else if a := get(row, amountCol); !blankAmount(a) {
+			amount, aok = parseCSVAmount(a, decimalComma)
+			bad = !aok
+		}
+		if bad {
+			skipped++
+			reasons["Unparseable amount (check the comma-decimals option)"]++
+			continue
 		}
 		if !aok || amount == 0 {
 			skipped++
@@ -298,13 +446,12 @@ func (c *Controller) ImportCommit(w http.ResponseWriter, r *http.Request) {
 		}
 		payee := get(row, payeeCol)
 		if skipDupes {
-			k := model.TxDedupKey(dateStr, amount, payee)
-			if seen[k] {
+			if k := model.TxDedupKey(dateStr, amount, payee); existing[k] > 0 {
+				existing[k]--
 				skipped++
 				reasons["Duplicate (already in account)"]++
 				continue
 			}
-			seen[k] = true
 		}
 		var catID *int64
 		if catCol >= 0 {

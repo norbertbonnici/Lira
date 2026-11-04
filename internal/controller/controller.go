@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -413,15 +414,33 @@ func (c *Controller) TransferCreate(w http.ResponseWriter, r *http.Request) {
 	toID, _ := strconv.ParseInt(r.FormValue("to_id"), 10, 64)
 	amount := absf(parseFloat(r.FormValue("amount")))
 	date := strings.TrimSpace(r.FormValue("date"))
-	if fromID == 0 || toID == 0 || fromID == toID || amount == 0 || date == "" {
+	fail := func(msg string) {
 		accts, _ := c.store.ListAccounts()
-		c.render(w, r, "transfer_form.html", map[string]any{
-			"Accounts": accts,
-			"Error":    "Pick two different accounts, a non-zero amount and a date.",
-		})
+		c.render(w, r, "transfer_form.html", map[string]any{"Accounts": accts, "Error": msg})
+	}
+	if fromID == 0 || toID == 0 || fromID == toID || amount == 0 || date == "" {
+		fail("Pick two different accounts, a non-zero amount and a date.")
 		return
 	}
-	if err := c.store.CreateTransfer(fromID, toID, date, amount, strings.TrimSpace(r.FormValue("notes"))); err != nil {
+	from, ferr := c.store.GetAccount(fromID)
+	to, terr := c.store.GetAccount(toID)
+	if ferr != nil || terr != nil {
+		fail("Pick two different accounts, a non-zero amount and a date.")
+		return
+	}
+	// Same currency: what leaves arrives. Different currencies: the same number
+	// on both legs would be wrong (100 EUR out, 100 USD in shifts net worth by
+	// the FX gap), so the amount received in the destination currency is required.
+	received := amount
+	if !strings.EqualFold(from.Currency, to.Currency) {
+		received = absf(parseFloat(r.FormValue("received")))
+		if received == 0 {
+			fail(fmt.Sprintf("%s is in %s and %s is in %s — enter the amount received in %s too.",
+				from.Name, from.Currency, to.Name, to.Currency, to.Currency))
+			return
+		}
+	}
+	if err := c.store.CreateTransfer(fromID, toID, date, amount, received, strings.TrimSpace(r.FormValue("notes"))); err != nil {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
@@ -494,15 +513,16 @@ func (c *Controller) Holdings(w http.ResponseWriter, r *http.Request) {
 		updated = updated[:10]
 	}
 	c.render(w, r, "holdings.html", map[string]any{
-		"Rows":         rows,
-		"Currencies":   currencies,
-		"ShowFX":       anyFX,
-		"Total":        total,
-		"TotalGain":    totalGain,
-		"TotalGainPct": totalGainPct,
-		"HasGains":     totalCost > 0,
-		"Updated":      updated,
-		"Refreshable":  c.refresh != nil,
+		"RefreshFailed": r.URL.Query().Get("refresh") == "failed",
+		"Rows":          rows,
+		"Currencies":    currencies,
+		"ShowFX":        anyFX,
+		"Total":         total,
+		"TotalGain":     totalGain,
+		"TotalGainPct":  totalGainPct,
+		"HasGains":      totalCost > 0,
+		"Updated":       updated,
+		"Refreshable":   c.refresh != nil,
 	})
 }
 

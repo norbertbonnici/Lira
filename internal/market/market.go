@@ -259,3 +259,19 @@ func UpdateFX(ctx context.Context, p FXProvider, s FXStore) (int, error) {
 	}
 	return n, nil
 }
+
+// Refresh updates EUR rates and then holding prices. A failure in one doesn't
+// skip the other — prices for EUR (or already-rated) holdings are still worth
+// fetching when, say, one currency code is unknown to the provider — and both
+// errors are returned, joined.
+func Refresh(ctx context.Context, fx FXProvider, fs FXStore, pp PriceProvider, ps PriceStore) error {
+	_, fxErr := UpdateFX(ctx, fx, fs)
+	if fxErr != nil {
+		fxErr = fmt.Errorf("fx: %w", fxErr)
+	}
+	_, priceErr := UpdatePrices(ctx, pp, ps)
+	if priceErr != nil {
+		priceErr = fmt.Errorf("prices: %w", priceErr)
+	}
+	return errors.Join(fxErr, priceErr)
+}

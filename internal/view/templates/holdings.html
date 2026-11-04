@@ -15,6 +15,7 @@
     <a class="primary button" href="/holdings/new">+ New holding</a>
   </span>
 </div>
+{{if .RefreshFailed}}<p class="small neg">The price refresh didn't fully succeed (details are in the server log) — anything it couldn't fetch keeps its last known value.</p>{{end}}
 {{if .Rows}}
 <table class="table">
   <thead><tr><th>Symbol</th><th>Name</th><th>Type</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Gain (EUR)</th><th></th></tr></thead>
