@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"lira/internal/config"
 	"lira/internal/model"
@@ -262,4 +263,85 @@ func TestMCPTools(t *testing.T) {
 	if p := callTool(t, srv, "tok-bob", "get_pocket", map[string]any{}, false); p["balance"].(float64) != 0 || len(p["recentEntries"].([]any)) != 0 {
 		t.Errorf("bob must not see alice's pocket: %+v", p)
 	}
+}
+
+// compact mode trims rows to what a small on-device model needs, and
+// spending_by_category's limit folds the tail into one reconciling row.
+func TestMCPCompact(t *testing.T) {
+	srv, store := mcpServer(t)
+	if err := store.CreateAccount("Main", "current", "EUR", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	accts, _ := store.ListAccounts()
+	aid := accts[0].ID
+	cats, _ := store.ListCategories()
+	catID := map[string]int64{}
+	for _, c := range cats {
+		catID[c.Name] = c.ID
+	}
+	today := time.Now().Format("2006-01-02")
+	add := func(amt float64, payee, cat string) {
+		t.Helper()
+		var cid *int64
+		if id, ok := catID[cat]; ok {
+			cid = &id
+		}
+		if err := store.CreateTransaction(aid, today, amt, cid, payee, "private note"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(-50, "Lidl", "Groceries")
+	add(-50, "Lidl", "Groceries") // duplicate
+	add(-30, "Bus", "Transport")
+	add(-20, "Cafe", "Dining")
+	add(-10, "Shop", "Other")
+	add(-5, "Unknown", "")
+
+	sr := callTool(t, srv, "tok-alice", "search_transactions", map[string]any{"compact": true, "query": "lidl"}, false)
+	row := sr["transactions"].([]any)[0].(map[string]any)
+	for _, k := range []string{"id", "notes", "accountId", "categoryId", "projectId", "transfer"} {
+		if _, ok := row[k]; ok {
+			t.Errorf("compact search row should not carry %q: %v", k, row)
+		}
+	}
+	if row["payee"] != "Lidl" || row["category"] != "Groceries" || row["amount"].(float64) != -50 {
+		t.Errorf("compact search row: %v", row)
+	}
+	if _, ok := sr["offset"]; ok {
+		t.Errorf("compact search should drop offset: %v", sr)
+	}
+	full := callTool(t, srv, "tok-alice", "search_transactions", map[string]any{"query": "lidl"}, false)
+	if _, ok := full["transactions"].([]any)[0].(map[string]any)["id"]; !ok {
+		t.Error("non-compact search must keep ids")
+	}
+
+	d := callTool(t, srv, "tok-alice", "find_duplicate_transactions", map[string]any{"compact": true}, false)
+	g := d["groups"].([]any)[0].(map[string]any)
+	if _, ok := g["transactionIds"]; ok || d["groupsFound"].(float64) != 1 {
+		t.Errorf("compact duplicates: %v", d)
+	}
+	u := callTool(t, srv, "tok-alice", "find_uncategorized_transactions", map[string]any{"compact": true}, false)
+	if _, ok := u["groups"].([]any)[0].(map[string]any)["transactionIds"]; ok {
+		t.Errorf("compact uncategorized should drop ids: %v", u)
+	}
+	an := callTool(t, srv, "tok-alice", "find_anomalies", map[string]any{"compact": true}, false)
+	if an["returned"].(float64) < 0 {
+		t.Errorf("anomalies: %v", an)
+	}
+
+	sp := callTool(t, srv, "tok-alice", "spending_by_category", map[string]any{"limit": 2}, false)
+	rows := sp["categories"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("limit 2 should give 2 rows + Other, got %v", rows)
+	}
+	var sum float64
+	for _, r := range rows {
+		sum += r.(map[string]any)["amount"].(float64)
+	}
+	other := rows[2].(map[string]any)
+	if other["category"] != "Other (3 categories)" || other["amount"].(float64) != 35 || sum != sp["totalSpending"].(float64) {
+		t.Errorf("Other row / reconciliation: %v (sum %v)", rows, sum)
+	}
+	callTool(t, srv, "tok-alice", "spending_by_category", map[string]any{"limit": 0}, true)
+	callTool(t, srv, "tok-alice", "search_transactions", map[string]any{"compact": "yes"}, true)
 }

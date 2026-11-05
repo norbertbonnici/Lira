@@ -341,6 +341,12 @@ func sDate(desc string) map[string]any {
 func sInt(desc string, lo, hi int) map[string]any {
 	return map[string]any{"type": "integer", "minimum": lo, "maximum": hi, "description": desc}
 }
+
+// sCompact is the shared "compact" flag for small-context clients (e.g. an
+// on-device model): rows drop ids, notes and project/link detail.
+func sCompact() map[string]any {
+	return sBool("Return a minimal shape for small-context models: no ids, notes or project/link detail")
+}
 func sNum(desc string) map[string]any  { return map[string]any{"type": "number", "description": desc} }
 func sBool(desc string) map[string]any { return map[string]any{"type": "boolean", "description": desc} }
 func sEnum(desc string, vals ...string) map[string]any {
@@ -408,6 +414,7 @@ var mcpTools = []mcpTool{
 			"includeTransfers": sBool("Include transfer legs between own accounts"),
 			"limit":            sInt("Max rows to return (default 50)", 1, 500),
 			"offset":           sInt("Rows to skip, for paging", 0, math.MaxInt32),
+			"compact":          sCompact(),
 		}),
 		Run: (*Controller).mcpSearchTransactions,
 	},
@@ -415,8 +422,12 @@ var mcpTools = []mcpTool{
 		Name: "spending_by_category", Title: "Spending by category",
 		Description: "Total spending per category over a date range (default: this month), largest first, excluding transfers. " +
 			"Sums raw transaction amounts (not FX-converted), matching Lira's Insights page.",
-		Schema: schema(props{"from": sDate("Start, inclusive"), "to": sDate("End, inclusive")}),
-		Run:    (*Controller).mcpSpendByCategory,
+		Schema: schema(props{
+			"from":  sDate("Start, inclusive"),
+			"to":    sDate("End, inclusive"),
+			"limit": sInt("Return only the top N categories; the rest are summed into one \"Other\" row", 1, 100),
+		}),
+		Run: (*Controller).mcpSpendByCategory,
 	},
 	{
 		Name: "monthly_totals", Title: "Monthly totals",
@@ -464,6 +475,7 @@ var mcpTools = []mcpTool{
 			"accountId":  sInt("Only this account", 1, math.MaxInt32),
 			"windowDays": sInt("Max days between duplicates (default 0 = same date)", 0, 7),
 			"limit":      sInt("Max groups to return (default 50)", 1, 500),
+			"compact":    sCompact(),
 		}),
 		Run: (*Controller).mcpDuplicates,
 	},
@@ -474,9 +486,10 @@ var mcpTools = []mcpTool{
 			"projectLinks lists rows already tied to a project (item payment, loan deposit, or project tag) — that money is tracked by the project whatever its category — " +
 			"with the category the project's other transactions mostly use, as a fallback suggestion.",
 		Schema: schema(props{
-			"from":  sDate("Earliest date, inclusive"),
-			"to":    sDate("Latest date, inclusive"),
-			"limit": sInt("Max payee groups to return (default 50)", 1, 500),
+			"from":    sDate("Earliest date, inclusive"),
+			"to":      sDate("Latest date, inclusive"),
+			"limit":   sInt("Max payee groups to return (default 50)", 1, 500),
+			"compact": sCompact(),
 		}),
 		Run: (*Controller).mcpUncategorized,
 	},
@@ -485,10 +498,11 @@ var mcpTools = []mcpTool{
 		Description: "Transactions that look like bookkeeping mistakes: sign_mismatch (positive in an expense category / negative in an income one — may be a refund), " +
 			"outlier (far above the payee's typical amount, e.g. an extra digit), future_dated, zero_amount.",
 		Schema: schema(props{
-			"from":  sDate("Earliest date, inclusive"),
-			"to":    sDate("Latest date, inclusive"),
-			"kind":  sEnum("Only this kind of anomaly", "sign_mismatch", "outlier", "future_dated", "zero_amount"),
-			"limit": sInt("Max findings to return (default 100)", 1, 500),
+			"from":    sDate("Earliest date, inclusive"),
+			"to":      sDate("Latest date, inclusive"),
+			"kind":    sEnum("Only this kind of anomaly", "sign_mismatch", "outlier", "future_dated", "zero_amount"),
+			"limit":   sInt("Max findings to return (default 100)", 1, 500),
+			"compact": sCompact(),
 		}),
 		Run: (*Controller).mcpAnomalies,
 	},
@@ -565,6 +579,19 @@ func txJSON(t model.Transaction) map[string]any {
 		m["depositForProjectId"] = t.DepositProjectID.Int64
 	}
 	if t.AccountCurrency != "" {
+		m["currency"] = t.AccountCurrency
+	}
+	return m
+}
+
+// txCompact is txJSON for small-context clients: just what a person needs to
+// recognise the transaction.
+func txCompact(t model.Transaction) map[string]any {
+	m := map[string]any{"date": t.Date, "amount": r2(t.Amount), "payee": t.Payee, "account": t.AccountName}
+	if t.CategoryName != "" {
+		m["category"] = t.CategoryName
+	}
+	if t.AccountCurrency != "" && t.AccountCurrency != "EUR" {
 		m["currency"] = t.AccountCurrency
 	}
 	return m
@@ -683,6 +710,10 @@ func (c *Controller) mcpSearchTransactions(u *model.User, a mcpArgs) (map[string
 	if f.Offset, err = a.integer("offset", 0, 0, math.MaxInt32); err != nil {
 		return nil, err
 	}
+	compact, err := a.boolean("compact")
+	if err != nil {
+		return nil, err
+	}
 	total, err := c.store.CountTransactions(f)
 	if err != nil {
 		return nil, errors.New("could not search transactions")
@@ -693,13 +724,24 @@ func (c *Controller) mcpSearchTransactions(u *model.User, a mcpArgs) (map[string
 	}
 	rows := make([]map[string]any, 0, len(txs))
 	for _, t := range txs {
-		rows = append(rows, txJSON(t))
+		if compact {
+			rows = append(rows, txCompact(t))
+		} else {
+			rows = append(rows, txJSON(t))
+		}
+	}
+	if compact {
+		return map[string]any{"total": total, "returned": len(rows), "transactions": rows}, nil
 	}
 	return map[string]any{"total": total, "offset": f.Offset, "returned": len(rows), "transactions": rows}, nil
 }
 
 func (c *Controller) mcpSpendByCategory(u *model.User, a mcpArgs) (map[string]any, error) {
 	from, to, err := a.dateRange()
+	if err != nil {
+		return nil, err
+	}
+	limit, err := a.integer("limit", 0, 1, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -726,7 +768,27 @@ func (c *Controller) mcpSpendByCategory(u *model.User, a mcpArgs) (map[string]an
 		}
 		out = append(out, map[string]any{"category": ct.Category, "amount": r2(ct.Amount), "sharePct": share})
 	}
+	out = topCategories(out, limit, total)
 	return map[string]any{"from": from, "to": to, "totalSpending": r2(total), "categories": out}, nil
+}
+
+// topCategories keeps the first n rows (already largest first) and folds the
+// rest into one "Other (k categories)" row so the total still reconciles.
+// n <= 0 keeps everything.
+func topCategories(rows []map[string]any, n int, total float64) []map[string]any {
+	if n <= 0 || len(rows) <= n {
+		return rows
+	}
+	var rest float64
+	for _, r := range rows[n:] {
+		rest += r["amount"].(float64)
+	}
+	share := 0.0
+	if total > 0 {
+		share = math.Round(rest/total*1000) / 10
+	}
+	other := map[string]any{"category": fmt.Sprintf("Other (%d categories)", len(rows)-n), "amount": r2(rest), "sharePct": share}
+	return append(rows[:n:n], other)
 }
 
 func (c *Controller) mcpMonthlyTotals(u *model.User, a mcpArgs) (map[string]any, error) {
@@ -980,6 +1042,10 @@ func (c *Controller) mcpDuplicates(u *model.User, a mcpArgs) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	compact, err := a.boolean("compact")
+	if err != nil {
+		return nil, err
+	}
 	txs, err := c.ledger(int64(acct))
 	if err != nil {
 		return nil, err
@@ -997,14 +1063,18 @@ func (c *Controller) mcpDuplicates(u *model.User, a mcpArgs) (map[string]any, er
 		found++
 		extra += math.Abs(g.Amount) * float64(len(g.IDs)-1)
 		if len(groups) < limit {
-			groups = append(groups, map[string]any{
-				"accountId": g.AccountID, "account": g.AccountName, "amount": r2(g.Amount), "payee": g.Payee,
-				"dates": g.Dates, "transactionIds": g.IDs,
-			})
+			grp := map[string]any{"account": g.AccountName, "amount": r2(g.Amount), "payee": g.Payee, "dates": g.Dates}
+			if !compact {
+				grp["accountId"], grp["transactionIds"] = g.AccountID, g.IDs
+			}
+			groups = append(groups, grp)
 		}
 	}
 	if groups == nil {
 		groups = []map[string]any{}
+	}
+	if compact {
+		return map[string]any{"groupsFound": found, "surplusAmountIfAllDuplicates": r2(extra), "groups": groups}, nil
 	}
 	return map[string]any{
 		"windowDays": window, "groupsFound": found, "returned": len(groups),
@@ -1019,6 +1089,10 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 		return nil, err
 	}
 	limit, err := a.integer("limit", 50, 1, 500)
+	if err != nil {
+		return nil, err
+	}
+	compact, err := a.boolean("compact")
 	if err != nil {
 		return nil, err
 	}
@@ -1052,17 +1126,24 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 			continue
 		}
 		totalTx += len(ids)
-		row := map[string]any{"payee": g.Payee, "count": len(ids), "total": r2(sum), "transactionIds": ids}
+		row := map[string]any{"payee": g.Payee, "count": len(ids), "total": r2(sum)}
+		if !compact {
+			row["transactionIds"] = ids
+		}
 		if links != nil {
 			linked += len(links)
-			row["projectLinks"] = links
+			if !compact {
+				row["projectLinks"] = links
+			}
 		}
 		if g.SuggestedID != 0 {
 			withSuggestion += len(ids)
-			row["suggestedCategoryId"] = g.SuggestedID
 			row["suggestedCategory"] = g.Suggested
 			row["confidence"] = g.Confidence
-			row["basedOnTransactions"] = g.Basis
+			if !compact {
+				row["suggestedCategoryId"] = g.SuggestedID
+				row["basedOnTransactions"] = g.Basis
+			}
 		}
 		if len(groups) < limit {
 			groups = append(groups, row)
@@ -1070,6 +1151,11 @@ func (c *Controller) mcpUncategorized(u *model.User, a mcpArgs) (map[string]any,
 	}
 	if groups == nil {
 		groups = []map[string]any{}
+	}
+	if compact {
+		return map[string]any{
+			"uncategorizedTransactions": totalTx, "withSuggestion": withSuggestion, "linkedToProjects": linked, "groups": groups,
+		}, nil
 	}
 	return map[string]any{
 		"uncategorizedTransactions": totalTx, "withSuggestion": withSuggestion, "linkedToProjects": linked,
@@ -1115,6 +1201,10 @@ func (c *Controller) mcpAnomalies(u *model.User, a mcpArgs) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
+	compact, err := a.boolean("compact")
+	if err != nil {
+		return nil, err
+	}
 	txs, err := c.ledger(0)
 	if err != nil {
 		return nil, err
@@ -1127,7 +1217,11 @@ func (c *Controller) mcpAnomalies(u *model.User, a mcpArgs) (map[string]any, err
 		}
 		counts[an.Kind]++
 		if len(rows) < limit {
-			rows = append(rows, map[string]any{"kind": an.Kind, "detail": an.Detail, "transaction": txJSON(an.Tx)})
+			tx := txJSON(an.Tx)
+			if compact {
+				tx = txCompact(an.Tx)
+			}
+			rows = append(rows, map[string]any{"kind": an.Kind, "detail": an.Detail, "transaction": tx})
 		}
 	}
 	if rows == nil {

@@ -281,6 +281,10 @@ in the web app.
 | `find_uncategorized_transactions` | uncategorized rows grouped by payee, with a category suggested from history |
 | `find_anomalies` | sign mismatches, outliers (an extra digit?), future-dated, zero amounts |
 
+Small-context clients (such as an on-device model) can pass `compact: true` to
+the search and audit tools, and `limit` to `spending_by_category`, to get much
+shorter replies.
+
 Connect a client (use a token minted for this purpose, so you can revoke it on its own):
 
 ```bash
