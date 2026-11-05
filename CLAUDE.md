@@ -483,6 +483,13 @@ latest; a bad `MCP-Protocol-Version` header → 400). A browser `Origin` must ma
   `FindAnomalies` (sign_mismatch / outlier vs payee median / future_dated /
   zero_amount). Audits read the **full** ledger (history informs medians and
   suggestions) and the handlers filter findings by date range afterwards.
+- **Compact mode for small-context clients** (the iOS app's on-device Apple
+  model): `search_transactions`, `find_duplicate_transactions`,
+  `find_uncategorized_transactions` and `find_anomalies` take `compact: true`,
+  which drops ids, notes, project/link detail and paging fields (`txCompact` =
+  date/amount/payee/account/category, currency only when non-EUR).
+  `spending_by_category` takes `limit` (top N + one "Other (k categories)" row
+  that keeps the total reconciling, `topCategories`). Default output is unchanged.
 - The server `instructions` tell the model that payee/notes text is untrusted
   (bank/CSV-sourced), since it flows straight into the model's context.
 - **Write tools follow propose→apply** (`controller/mcp_write.go`,
