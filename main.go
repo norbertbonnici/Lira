@@ -106,6 +106,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/summary", c.APIAuth(c.APISummary))
 	mux.HandleFunc("GET /api/v1/accounts", c.APIAuth(c.APIAccounts))
 	mux.HandleFunc("POST /api/v1/accounts", c.APIAuth(c.APICreateAccount))
+	mux.HandleFunc("GET /api/v1/categories", c.APIAuth(c.APICategories))
 	mux.HandleFunc("GET /api/v1/transactions", c.APIAuth(c.APITransactions))
 	mux.HandleFunc("POST /api/v1/transactions", c.APIAuth(c.APICreateTransaction))
 	mux.HandleFunc("DELETE /api/v1/transactions/{id}", c.APIAuth(c.APIDeleteTransaction))

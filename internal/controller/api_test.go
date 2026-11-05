@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -42,5 +43,58 @@ func TestAPIRejectsBadDates(t *testing.T) {
 	}
 	if n, _ := store.ListPocketEntries(uid); len(n) != 1 {
 		t.Errorf("stored %d pocket entries want 1", len(n))
+	}
+}
+
+// The iOS add-transaction picker reads /categories and sends the chosen id;
+// an unknown id is a 422, not a 500 from the foreign key.
+func TestAPICategoriesAndCategorizedCreate(t *testing.T) {
+	c, store := testController(t)
+	uid, _ := store.CreateUser("api", "h", "admin")
+	u, _ := store.GetUserByID(uid)
+	_ = store.CreateAccount("Bank", "checking", "EUR", 0, false)
+	accts, _ := store.ListAccounts()
+	acct := strconv.FormatInt(accts[0].ID, 10)
+	if err := store.CreateCategory("Groceries", "expense"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	c.APICategories(w, httptest.NewRequest(http.MethodGet, "/", nil), u)
+	if w.Code != 200 {
+		t.Fatalf("categories: status %d", w.Code)
+	}
+	var cats []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &cats); err != nil {
+		t.Fatal(err)
+	}
+	var groceries int64
+	for _, cat := range cats {
+		if cat.Name == "Groceries" && cat.Kind == "expense" {
+			groceries = cat.ID
+		}
+	}
+	if groceries == 0 {
+		t.Fatalf("Groceries missing from %+v", cats)
+	}
+
+	post := func(body string) int {
+		w := httptest.NewRecorder()
+		c.APICreateTransaction(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), u)
+		return w.Code
+	}
+	if code := post(`{"accountId":` + acct + `,"date":"2026-11-05","amount":-5,"categoryId":999999}`); code != 422 {
+		t.Errorf("unknown categoryId: status %d want 422", code)
+	}
+	if code := post(`{"accountId":` + acct + `,"date":"2026-11-05","amount":-5,"categoryId":` + strconv.FormatInt(groceries, 10) + `}`); code != 201 {
+		t.Fatalf("categorized create: status %d want 201", code)
+	}
+	txs, _ := store.ListTransactions(10)
+	if len(txs) != 1 || !txs[0].CategoryID.Valid || txs[0].CategoryID.Int64 != groceries {
+		t.Errorf("stored %+v, want one Groceries transaction", txs)
 	}
 }
