@@ -135,6 +135,21 @@ func (c *Controller) APIAccounts(w http.ResponseWriter, r *http.Request, u *mode
 	writeJSON(w, 200, out)
 }
 
+// APICategories lists the transaction categories (income|expense) so a client
+// can offer a picker when it creates a transaction.
+func (c *Controller) APICategories(w http.ResponseWriter, r *http.Request, u *model.User) {
+	cats, err := c.store.ListCategories()
+	if err != nil {
+		apiError(w, 500, "database error")
+		return
+	}
+	out := make([]map[string]any, 0, len(cats))
+	for _, cat := range cats {
+		out = append(out, map[string]any{"id": cat.ID, "name": cat.Name, "kind": cat.Kind})
+	}
+	writeJSON(w, 200, out)
+}
+
 func (c *Controller) APITransactions(w http.ResponseWriter, r *http.Request, u *model.User) {
 	limit := 100
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
@@ -233,6 +248,12 @@ func (c *Controller) APICreateTransaction(w http.ResponseWriter, r *http.Request
 	if !isDate(in.Date) {
 		apiError(w, 422, "date must be YYYY-MM-DD")
 		return
+	}
+	if in.CategoryID != nil {
+		if _, err := c.store.GetCategory(*in.CategoryID); err != nil {
+			apiError(w, 422, "unknown categoryId")
+			return
+		}
 	}
 	if err := c.store.CreateTransaction(in.AccountID, in.Date, in.Amount, in.CategoryID, strings.TrimSpace(in.Payee), strings.TrimSpace(in.Notes)); err != nil {
 		apiError(w, 500, "database error")

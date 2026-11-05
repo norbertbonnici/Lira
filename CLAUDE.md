@@ -438,12 +438,13 @@ from the no-JS HTML app, so the CSP/server-rendered rules don't apply to it.
   Scope gates **only the MCP write tools** — the `/api/v1` REST writes predate it
   and stay ungated so existing clients keep working.
 - Endpoints (all `c.APIAuth(...)` in `main.go`): `GET /me`, `/summary`, `/accounts`,
-  `/transactions`, `/holdings`, `/projects`, `/costs`, `/pocket`; writes `POST
+  `/categories`, `/transactions`, `/holdings`, `/projects`, `/costs`, `/pocket`; writes `POST
   /transactions`, `/accounts`, `/holdings`, `/pocket` and `DELETE /transactions/{id}`,
   `/pocket/{id}`. Handlers emit clean JSON via map DTOs (avoids `sql.Null*`
   marshaling); helpers `writeJSON`/`apiError`/`decodeJSON` (1 MB body cap).
   Write dates must be `YYYY-MM-DD` (`isDate`, else 422) — reports group and
-  range-filter on that text form.
+  range-filter on that text form. A transaction's `categoryId` must exist
+  (else 422).
 - Deferred (easy to add): edits/`PUT`, projects/costs writes, transfers, pagination.
   Served over TLS (Cloudflare/Caddy) — token + HTTPS is the whole model.
 

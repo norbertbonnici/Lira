@@ -239,6 +239,7 @@ tokens. Run it over HTTPS (you already do, behind Cloudflare/Caddy).
 | GET | `/api/v1/me` | user + household |
 | GET | `/api/v1/summary` | net worth, cash, investments, budget |
 | GET / POST | `/api/v1/accounts` | list / create |
+| GET | `/api/v1/categories` | transaction categories (`id`, `name`, `kind`) |
 | GET / POST | `/api/v1/transactions` | list (`?limit=`) / create |
 | DELETE | `/api/v1/transactions/{id}` | delete |
 | GET / POST | `/api/v1/holdings` | list / create |
